@@ -1,0 +1,61 @@
+{
+  "clients": [
+    {
+      "key": "hopper",
+      "name": "Hopper Joint Melbourne",
+      "senders": [
+        "accounts@hopperjointmelbourne.com.au"
+      ],
+      "outlookFolder": "Inbox/Hopper Joint",
+      "sharepoint": {
+        "hostname": "srperksca.sharepoint.com",
+        "sitePath": "/sites/sharepoint",
+        "library": "Documents",
+        "billsFolder": "Business/SR Perks/Client Data/1 Business Clients/CHE001 - Chemgro Group/CHE001H1 - Hopper Joint Pty Ltd/{FY}/Bookkeeping/Accounts Payable",
+        "statementsFolder": "Business/SR Perks/Client Data/1 Business Clients/CHE001 - Chemgro Group/CHE001H1 - Hopper Joint Pty Ltd/{FY}/Bookkeeping/Accounts Payable",
+        "monthFolders": true,
+        "billsList": {
+          "fileName": "Bills List.xlsx"
+        }
+      },
+      "xero": {
+        "tenantId": "21c5557d-7aaa-4afb-b152-f009432c9a73",
+        "defaultAccountCode": "",
+        "taxTypeWithGst": "INPUT",
+        "taxTypeNoGst": "EXEMPTEXPENSES"
+      }
+    },
+    {
+      "key": "harcourts",
+      "name": "Harcourts Cafe",
+      "senders": [
+        "accounts@harcourtscafe.com.au"
+      ],
+      "outlookFolder": "Inbox/Harcourts Cafe",
+      "sharepoint": {
+        "hostname": "srperksca.sharepoint.com",
+        "sitePath": "/sites/sharepoint",
+        "library": "Documents",
+        "billsFolder": "Business/SR Perks/Client Data/1 Business Clients/HAR001 - Harcourts Hospitality Ventures Group/HAR001H1 - Harcourts Hospitality Ventures PL/{FY}/Bookkeeping/Accounts Payable",
+        "statementsFolder": "Business/SR Perks/Client Data/1 Business Clients/HAR001 - Harcourts Hospitality Ventures Group/HAR001H1 - Harcourts Hospitality Ventures PL/{FY}/Bookkeeping/Accounts Payable",
+        "monthFolders": true,
+        "billsList": {
+          "fileName": "Bills List.xlsx"
+        }
+      },
+      "xero": {
+        "tenantId": "9b19fb5a-4f59-49ac-84fc-054e04fed062",
+        "defaultAccountCode": "",
+        "taxTypeWithGst": "INPUT",
+        "taxTypeNoGst": "EXEMPTEXPENSES"
+      }
+    }
+  ],
+  "rules": {
+    "extraBillHeadings": [],
+    "extraStatementHeadings": []
+  },
+  "allowedCurrencies": [
+    "AUD"
+  ]
+}
