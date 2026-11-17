@@ -72,6 +72,18 @@ export class FakeGraph implements GraphPort {
   async sendMail(to: string[], subject: string, body: string) { this.sent.push({ to, subject, body }); }
   async resolveDrive(): Promise<DriveRef> { return { siteId: 's', driveId: 'd' }; }
   async folderExists(_d: DriveRef, p: string) { return this.folders.has(p) || [...this.folders].some((f) => f.startsWith(`${p}/`)); }
+  failMove = false;
+  async listFiles(_d: DriveRef, folder: string): Promise<DriveItem[]> {
+    return this.filesIn(folder).filter((n) => !n.includes('/')).map((n) => ({ id: `${folder}/${n}`, name: n, size: this.files.get(`${folder}/${n}`)!.length }));
+  }
+  async moveItem(_d: DriveRef, itemId: string, destFolder: string) {
+    if (this.failMove) throw new GraphError('move failed', 503);
+    const buf = this.files.get(itemId)!;
+    this.files.delete(itemId);
+    let key = `${destFolder}/${itemId.split('/').pop()}`;
+    for (let n = 2; this.files.has(key); n++) key = `${destFolder}/${n}-${itemId.split('/').pop()}`;
+    this.files.set(key, buf);
+  }
   async getItem(_d: DriveRef, path: string): Promise<DriveItem | null> {
     const b = this.files.get(path);
     return b ? { id: path, name: path.split('/').pop()!, size: b.length } : null;

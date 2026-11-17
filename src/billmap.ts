@@ -1,6 +1,6 @@
 import type { BillData } from './types.js';
 import type { ResolvedBill } from './validate.js';
-import { near, round2 } from './util.js';
+import { round2 } from './util.js';
 
 export interface DraftLine {
   description: string;
@@ -26,6 +26,9 @@ export interface DraftBillInput {
   reference?: string;
 }
 
+/** Xero rounds quantity x unit price half-up to cents and rejects a line whose amount differs by even one cent. */
+const xeroRound = (n: number): number => Math.round(n * 100 + 1e-7) / 100;
+
 const decimals = (n: number): number => {
   const s = n.toString();
   const i = s.indexOf('.');
@@ -47,7 +50,7 @@ export function buildDraftLines(
     const amount = round2(l.line_amount);
     let quantity = 1;
     let unitAmount = amount;
-    if (l.quantity !== null && l.unit_price !== null && l.quantity !== 0 && near(l.quantity * l.unit_price, amount, 0.005) && decimals(l.unit_price) <= 2 && decimals(l.quantity) <= 4) {
+    if (l.quantity !== null && l.unit_price !== null && l.quantity !== 0 && xeroRound(l.quantity * l.unit_price) === amount && decimals(l.unit_price) <= 2 && decimals(l.quantity) <= 4) {
       quantity = l.quantity;
       unitAmount = l.unit_price;
     }

@@ -76,3 +76,38 @@ test('tool input repair: a cut-off bill text is rejected, never guessed', () => 
   const text = JSON.stringify(good.bill).slice(0, 120);
   assert.equal(ExtractionSchema.safeParse(normaliseToolInput({ ...good, bill: text })).success, false);
 });
+
+test('a bill sent as text that is missing its last closing brace is repaired, and an incomplete one still fails', async () => {
+  const { normaliseToolInput, parseJsonObjectText } = await import('../src/extract.js');
+  const good = billExtraction();
+  const full = JSON.stringify(good.bill);
+  const broken = full.slice(0, -1); // drop the final "}"
+  assert.ok(!broken.endsWith('}'));
+  const repaired = normaliseToolInput({ ...good, bill: broken }) as { bill: unknown };
+  assert.deepEqual(repaired.bill, JSON.parse(full));
+  assert.equal(ExtractionSchema.safeParse(repaired).success, true);
+
+  // Cut in the middle of the record: must not be accepted.
+  const cut = full.slice(0, Math.floor(full.length / 2));
+  const r2 = normaliseToolInput({ ...good, bill: cut }) as unknown;
+  assert.equal(ExtractionSchema.safeParse(r2).success, false);
+  assert.equal(parseJsonObjectText('{"a":1,"b":"unfinished'), undefined);
+});
+
+test('a bill that arrives without its totals is flagged, never given null totals; the totals are merged in from a second look', async () => {
+  const { billMissingTotals, mergeTotals } = await import('../src/extract.js');
+  const good = billExtraction();
+  const noTotals = JSON.parse(JSON.stringify(good)) as { bill: Record<string, unknown> };
+  delete noTotals.bill.total_gst;
+  delete noTotals.bill.total_inc_gst;
+  const n = normaliseToolInput(noTotals);
+  assert.equal(billMissingTotals(n), true);
+  assert.equal(ExtractionSchema.safeParse(n).success, false);
+  const merged = mergeTotals(n, { subtotal_ex_gst: good.bill!.subtotal_ex_gst, total_gst: good.bill!.total_gst, total_inc_gst: good.bill!.total_inc_gst });
+  assert.equal(billMissingTotals(merged), false);
+  assert.equal(ExtractionSchema.safeParse(merged).success, true);
+  // An explicit null from the model is a real answer, not a gap.
+  const explicitNull = JSON.parse(JSON.stringify(good)) as { bill: Record<string, unknown> };
+  explicitNull.bill.total_gst = null;
+  assert.equal(billMissingTotals(normaliseToolInput(explicitNull)), false);
+});

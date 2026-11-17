@@ -616,3 +616,90 @@ test('an interrupted earlier run (draft without the PDF attached, no list row) i
   assert.equal(t.xero.bills.length, 1);
   assert.equal(t.xero.bills[0]!.attachments.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Drop folder
+// ---------------------------------------------------------------------------
+
+function setupDrop(over: { dryRun?: boolean } = {}) {
+  const t = setup(over);
+  const dropClients = clients.map((c) => (c.key === 'hopper' ? { ...c, sharepoint: { ...c.sharepoint, dropFolder: 'Hopper/Drop' } } : c));
+  const pipeline = new Pipeline({
+    cfg: { dryRun: over.dryRun ?? false, passes: 2, allowedCurrencies: ['AUD'], contactFuzzyPolicy: 'review', createMissingContacts: true, blockOnDmarcFail: true, clients: dropClients },
+    graph: t.graph, xero: t.xero, extractor: t.extractor, rules: DEFAULT_RULES, log: silentLogger, alerter: t.alerter, ledger: t.ledger,
+    now: () => new Date('2026-10-28T10:00:00+11:00'),
+  });
+  for (const f of ['Hopper/Drop', 'Hopper/Drop/Processed', 'Hopper/Drop/Needs Review']) t.graph.folders.add(f);
+  return { ...t, pipeline, hopper: dropClients[0]! };
+}
+
+test('drop folder: a saved bill is filed like an emailed one and the original moves to Processed', async () => {
+  const t = setupDrop();
+  const pdf = await billPdf('INV-2001');
+  t.extractor.on(pdf, billExtraction());
+  t.graph.files.set('Hopper/Drop/old scan.pdf', pdf);
+  const out = await t.pipeline.processDrops(t.hopper);
+  assert.deepEqual(out.map((o) => o.status), ['filed']);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 1);
+  assert.equal(t.xero.bills.length, 1);
+  assert.equal(t.xero.bills[0]!.tenant, HOPPER_TENANT);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop/Processed'), ['old scan.pdf']);
+  assert.equal(t.graph.filesIn('Hopper/Drop').filter((n) => !n.includes('/')).length, 0);
+  assert.equal(t.ledger.rows.length, 1);
+});
+
+test('drop folder: a bill that was already processed is flagged DUPLICATE and moved to Needs Review', async () => {
+  const t = setupDrop();
+  const pdf = await billPdf('INV-2001');
+  t.extractor.on(pdf, billExtraction());
+  assert.equal((await t.pipeline.processMessage(t.graph.addMessage('e1', HOPPER, [{ name: 'a.pdf', buf: pdf }]))).status, 'moved');
+  t.graph.files.set('Hopper/Drop/again.pdf', pdf);
+  const out = await t.pipeline.processDrops(t.hopper);
+  assert.deepEqual(out.map((o) => o.status), ['review']);
+  assert.equal(t.xero.bills.length, 1);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 1);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop/Needs Review'), ['again.pdf']);
+  assert.match(t.alerter.alerts.at(-1)!.body, /DUPLICATE BILL/);
+});
+
+test('drop folder: something that is not a bill or statement, and a non-PDF, go to Needs Review with an alert', async () => {
+  const t = setupDrop();
+  const po = await randomPdf('9');
+  t.extractor.on(po, billExtraction({ document_heading: 'Purchase Order', document_type: 'other', bill: null }));
+  t.graph.files.set('Hopper/Drop/po.pdf', po);
+  t.graph.files.set('Hopper/Drop/notes.docx', Buffer.from('hello'));
+  const out = await t.pipeline.processDrops(t.hopper);
+  assert.deepEqual(out.map((o) => o.status), ['review', 'review']);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop/Needs Review').sort(), ['notes.docx', 'po.pdf']);
+  assert.equal(t.alerter.alerts.length, 2);
+  assert.equal(t.xero.bills.length, 0);
+});
+
+test('drop folder: a missing Processed or Needs Review folder stops with a clear setup message and touches nothing', async () => {
+  const t = setupDrop();
+  t.graph.folders.delete('Hopper/Drop/Needs Review');
+  const pdf = await billPdf('INV-2001');
+  t.extractor.on(pdf, billExtraction());
+  t.graph.files.set('Hopper/Drop/x.pdf', pdf);
+  await assert.rejects(() => t.pipeline.processDrops(t.hopper), /Needs Review/);
+  assert.equal(t.xero.bills.length, 0);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 0);
+});
+
+test('drop folder: a dry run writes and moves nothing, and does not read the same file again', async () => {
+  const t = setupDrop({ dryRun: true });
+  const pdf = await billPdf('INV-2001');
+  t.extractor.on(pdf, billExtraction());
+  t.graph.files.set('Hopper/Drop/x.pdf', pdf);
+  const first = await t.pipeline.processDrops(t.hopper);
+  assert.deepEqual(first.map((o) => o.status), ['dry_run']);
+  assert.deepEqual((await t.pipeline.processDrops(t.hopper)).length, 0);
+  assert.equal(t.xero.bills.length, 0);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 0);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop').sort(), ['x.pdf']);
+});
+
+test('drop folder: a client without a drop folder is not touched', async () => {
+  const t = setupDrop();
+  assert.deepEqual(t.pipeline.dropClients().map((c) => c.key), ['hopper']);
+});

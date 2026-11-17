@@ -134,6 +134,27 @@ async function main(): Promise<void> {
           }
         }
       }
+      for (const client of pipeline.dropClients()) {
+        if (stopping) break;
+        try {
+          const outcomes = await pipeline.processDrops(client);
+          for (const o of outcomes) {
+            if (cfg.dryRun && dryRunSeen.has(`drop:${client.key}:${o.file}`)) continue;
+            if (cfg.dryRun) dryRunSeen.add(`drop:${client.key}:${o.file}`);
+            if (o.status !== 'retry') state.processed++;
+            log.info(`Drop folder file done (${client.key}: ${o.file}): ${o.status}${o.detail.length ? ' | ' + o.detail.join(' | ') : ''}`, { client: client.key, file: o.file, status: o.status });
+          }
+        } catch (e) {
+          if (e instanceof SystemicError) {
+            pollIssue = `Setup problem: ${e.message}`;
+            log.error(`Setup problem blocking drop folder: ${e.message}`, { error: e.message });
+            await alerter.alert('Bookkeeping automation: setup problem', `${e.message}\n\nFiles are being left in the drop folder until this is fixed.`, `systemic:${e.message.slice(0, 120)}`);
+          } else {
+            pollIssue = `Drop folder failed (${client.key}): ${errMsg(e)}`;
+            log.error(pollIssue, { error: errMsg(e) });
+          }
+        }
+      }
       state.lastPollAt = new Date().toISOString();
       state.lastError = pollIssue;
     } catch (e) {

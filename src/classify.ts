@@ -39,13 +39,23 @@ export function normLine(s: string): string {
  * ("Tax Invoice #123", "Bill 4471", "Statement of Account").
  * "Bill To", "Bill Date", "Statement Date", "Tax Invoice Total" are labels, not headings.
  */
-function lineIsHeading(line: string, phrase: string): boolean {
+function lineIsHeading(line: string, phrase: string, siblings: string[] = []): boolean {
   const tokens = line.split(' ').filter(Boolean);
   while (tokens.length && PREFIX_WORDS.has(tokens[0]!)) tokens.shift();
   const p = phrase.split(' ');
   if (tokens.length < p.length) return false;
   for (let i = 0; i < p.length; i++) if (tokens[i] !== p[i]) return false;
-  const rest = tokens.slice(p.length);
+  let rest = tokens.slice(p.length);
+  // Combined headings: "Receipt / Tax Invoice", "Tax Invoice and Receipt". The slash is gone after
+  // normalising, so a second heading phrase straight after the first still counts as the heading.
+  for (const other of siblings) {
+    const o = other.split(' ');
+    const at = rest[0] === 'and' ? 1 : 0;
+    if (o.every((w, i) => rest[at + i] === w)) {
+      rest = rest.slice(at + o.length);
+      break;
+    }
+  }
   if (rest.length === 0) return true;
   if (rest.length > 4) return false;
   for (const t of rest) {
@@ -57,18 +67,37 @@ function lineIsHeading(line: string, phrase: string): boolean {
 }
 
 function matchesAny(line: string, phrases: string[]): boolean {
-  return phrases.some((p) => lineIsHeading(line, p));
+  return phrases.some((p) => lineIsHeading(line, p, phrases));
+}
+
+/**
+ * A multi-word heading that sits at the END of a busy row: "DUE DATE 16/11/2026 TAX INVOICE NUMBER MEL469705".
+ * Only multi-word phrases are tried this way ("tax invoice"), never single words like "bill", and the words after the
+ * phrase must still be just a number or label, so "Please pay this tax invoice by Friday" does not count.
+ */
+function endsWithHeading(line: string, phrases: string[]): boolean {
+  const tokens = line.split(' ').filter(Boolean);
+  const multi = phrases.filter((p) => p.includes(' '));
+  for (let i = 1; i < tokens.length; i++) {
+    const tail = tokens.slice(i).join(' ');
+    if (multi.some((p) => lineIsHeading(tail, p, phrases))) return true;
+  }
+  return false;
 }
 
 /** Classifies a list of visual lines (first N lines of page 1). */
 export function classifyLines(lines: string[], rules: HeadingRules, window = 30): HeadingKind {
   let bill = false;
   let statement = false;
-  for (const raw of lines.slice(0, window)) {
+  for (const [idx, raw] of lines.slice(0, window).entries()) {
     const line = normLine(raw);
     if (!line) continue;
     if (matchesAny(line, rules.billHeadings)) bill = true;
     if (matchesAny(line, rules.statementHeadings)) statement = true;
+    if (idx < 12) {
+      if (!bill && endsWithHeading(line, rules.billHeadings)) bill = true;
+      if (!statement && endsWithHeading(line, rules.statementHeadings)) statement = true;
+    }
   }
   if (bill && statement) return 'ambiguous';
   if (bill) return 'bill';
@@ -111,6 +140,12 @@ function phraseAnywhere(text: string, phrases: string[]): boolean {
   return phrases.some((p) => t.includes(` ${p} `));
 }
 
+function looksLikeLedger(text: string): boolean {
+  const t = ` ${normLine(text.replace(/\n/g, ' '))} `;
+  const has = (w: string) => t.includes(` ${w} `);
+  return has('balance') && has('invoice') && (has('due') || has('amount')) && !phraseAnywhere(text, ['tax invoice']);
+}
+
 export type Decision =
   | { kind: DocKind; basis: string }
   | { kind: 'other'; reason: string }
@@ -124,12 +159,29 @@ export type Decision =
  */
 export function decideType(text: PdfText | null, claude: Extraction, rules: HeadingRules): Decision {
   const claudeKind = classifyHeadingString(claude.document_heading, rules);
-  const textKind: HeadingKind | null = text && text.hasText ? classifyLines(text.page1Lines, rules) : null;
+  const textKind: HeadingKind | null = text && text.hasText ? classifyLines([...text.page1Lines, ...(text.page1Segments ?? [])], rules) : null;
 
   // The text layer shows a real heading, and Claude's heading text starts with the same words ("Tax Invoice No").
   if (claudeKind === 'none' && (textKind === 'bill' || textKind === 'statement')) {
     if (looseKind(claude.document_heading, rules) === textKind && claude.document_type === textKind && claude.confidence !== 'low') {
       return { kind: textKind, basis: 'heading confirmed by text layer; Claude read the same words with a label attached' };
+    }
+  }
+
+  // Claude's heading holds a recognised phrase inside a longer title ("Tax Invoice / Receipt",
+  // "Original Tax Invoice (Customer Copy)") and the PDF's own text shows the same phrase near the top.
+  if (claudeKind === 'none' && (claude.document_type === 'bill' || claude.document_type === 'statement') && claude.confidence !== 'low' && text && text.hasText) {
+    const kind = claude.document_type;
+    const other = kind === 'bill' ? rules.statementHeadings : rules.billHeadings;
+    const mine = kind === 'bill' ? rules.billHeadings : rules.statementHeadings;
+    const top = [...text.page1Lines.slice(0, 12), ...(text.page1Segments ?? [])].join('\n');
+    if (
+      phraseAnywhere(claude.document_heading, mine) &&
+      !phraseAnywhere(claude.document_heading, other) &&
+      phraseAnywhere(top, mine) &&
+      !phraseAnywhere(top, other)
+    ) {
+      return { kind, basis: 'heading phrase found inside a longer title, confirmed by text layer and by Claude' };
     }
   }
 
@@ -189,6 +241,11 @@ export function decideType(text: PdfText | null, claude: Extraction, rules: Head
     // Text layer exists but the heading line was not detected in the top lines.
     if (claude.confidence === 'high' && claude.document_type === claudeKind && text && phraseAnywhere(text.page1Text, phrases)) {
       return { kind: claudeKind, basis: 'heading found in page text outside the top lines, confirmed by Claude' };
+    }
+    // A statement title drawn as a picture or outlines never reaches the text layer. Filing a statement only saves
+    // a PDF (no Xero bill), so a high-confidence statement whose text looks like a ledger is accepted.
+    if (claudeKind === 'statement' && claude.confidence === 'high' && claude.document_type === 'statement' && textKind === 'none' && text && looksLikeLedger(text.page1Text)) {
+      return { kind: 'statement', basis: 'statement title not in the text layer, but the page text is a balance ledger and Claude is confident' };
     }
     return {
       kind: 'review',

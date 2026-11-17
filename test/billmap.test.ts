@@ -77,3 +77,23 @@ test('discount lines (negative amounts) flow through', () => {
   const lines = buildDraftLines(ex.bill!, v.resolved!, tax);
   assert.deepEqual(expectedXeroTotals(lines, false), { total: 198, gst: 18 });
 });
+
+test('a line whose printed amount is not what Xero would compute (1.1 x 63.95 printed as 70.34) is sent as quantity 1', () => {
+  const ex = billExtraction();
+  ex.bill!.lines = [{ description: 'Curry Leaves', quantity: 1.1, unit_price: 63.95, line_amount: 70.34, gst_applicable: false }];
+  ex.bill!.subtotal_ex_gst = 70.34;
+  ex.bill!.total_gst = 0;
+  ex.bill!.total_inc_gst = 70.34;
+  const lines = buildDraftLines(ex.bill!, validateBill(ex, ctx).resolved!, tax);
+  assert.equal(lines[0]!.quantity, 1);
+  assert.equal(lines[0]!.unitAmount, 70.34);
+
+  const ok = billExtraction();
+  ok.bill!.lines = [{ description: 'Ginger', quantity: 2, unit_price: 33.29, line_amount: 66.58, gst_applicable: false }];
+  ok.bill!.subtotal_ex_gst = 66.58;
+  ok.bill!.total_gst = 0;
+  ok.bill!.total_inc_gst = 66.58;
+  const l2 = buildDraftLines(ok.bill!, validateBill(ok, ctx).resolved!, tax);
+  assert.equal(l2[0]!.quantity, 2);
+  assert.equal(l2[0]!.unitAmount, 33.29);
+});

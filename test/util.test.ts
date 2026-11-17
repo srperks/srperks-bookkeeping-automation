@@ -61,3 +61,11 @@ test('supplier names are shown in proper case', () => {
   assert.equal(properName('Cookers Bulk Oil System Pty Ltd'), 'Cookers Bulk Oil System Pty Ltd');
   assert.equal(properName('McDonald Bros PTY LTD'), 'McDonald Bros Pty Ltd');
 });
+
+test('properName fixes mixed names with shouting or lowercase words', () => {
+  assert.equal(properName('MAJESTIC MANUFACTURING and PACKAGING SUPPLIES'), 'Majestic Manufacturing and Packaging Supplies');
+  assert.equal(properName('Grist artisan bakers'), 'Grist Artisan Bakers');
+  assert.equal(properName('white gum apples pty. ltd.'), 'White Gum Apples Pty. Ltd.');
+  assert.equal(properName('McDonald Bros PTY LTD'), 'McDonald Bros Pty Ltd');
+  assert.equal(properName('Smith and Sons BP Pty Ltd'), 'Smith and Sons BP Pty Ltd');
+});

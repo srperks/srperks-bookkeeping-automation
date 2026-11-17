@@ -94,3 +94,34 @@ test('a label-only Claude heading is rejected when its type disagrees with the t
   const d = decideType(txt(['Acme', 'Statement']), billExtraction({ document_heading: 'Tax Invoice No' }), R);
   assert.equal(d.kind, 'review');
 });
+
+test('combined heading "Receipt / Tax Invoice #123" is a bill heading', () => {
+  const rules = buildRules(['receipt']);
+  assert.equal(classifyLines(['Grist Artisan Bakers', 'Receipt / Tax Invoice #86644798014'], rules), 'bill');
+  assert.equal(classifyLines(['Tax Invoice / Receipt 1234'], rules), 'bill');
+  assert.equal(classifyLines(['Tax Invoice and Receipt'], rules), 'bill');
+});
+
+test('a longer title containing Tax Invoice is accepted only when text layer and Claude agree', () => {
+  const t = txt(['Acme', 'Original Tax Invoice (Customer Copy)', 'Total 10.00']);
+  const claude = { document_heading: 'Original Tax Invoice (Customer Copy)', document_type: 'bill', confidence: 'high' } as never;
+  assert.equal(decideType(t, claude, DEFAULT_RULES).kind, 'bill');
+  const noText = txt(['Acme', 'Total 10.00']);
+  assert.equal(decideType(noText, claude, DEFAULT_RULES).kind, 'review');
+});
+
+test('"TAX INVOICE NUMBER MEL1" at the end of a busy row is a bill heading; a sentence is not', () => {
+  assert.equal(classifyLines(['DUE DATE 16/11/2026 TAX INVOICE NUMBER MEL469705', 'ORDER DATE 08/11/2026'], R), 'bill');
+  assert.equal(classifyLines(['Please pay this tax invoice by Friday'], R), 'none');
+  assert.equal(classifyLines(['Total due on this bill 12'], R), 'none');
+});
+
+test('a statement whose title is not in the text layer is accepted when the page is a ledger and Claude is confident', () => {
+  const t = txt(['11/11/2026', 'Hopper Joint', 'Date Invoice Number Amount Due Date Balance AUD', '02/11/2026 F60836511 $46.01 09/11/2026 $46.01', 'PAYMENT ADVICE']);
+  const claude = { ...statementExtraction(), document_heading: 'STATEMENT', confidence: 'high' } as never;
+  assert.equal(decideType(t, claude, R).kind, 'statement');
+  const lowConf = { ...statementExtraction(), document_heading: 'STATEMENT', confidence: 'medium' } as never;
+  assert.equal(decideType(t, lowConf, R).kind, 'review');
+  const notLedger = txt(['Hopper Joint', 'Thank you for your business']);
+  assert.equal(decideType(notLedger, claude, R).kind, 'review');
+});

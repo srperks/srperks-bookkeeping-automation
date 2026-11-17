@@ -43,6 +43,8 @@ export interface DriveItem {
   name: string;
   size: number;
   webUrl?: string;
+  /** ISO time the file was last changed (used to skip files that are still being uploaded). */
+  lastModified?: string;
 }
 
 /** The slice of Graph the pipeline depends on. The pipeline is tested against an in-memory fake of this. */
@@ -57,6 +59,10 @@ export interface GraphPort {
   sendMail(to: string[], subject: string, body: string): Promise<void>;
   resolveDrive(hostname: string, sitePath: string, library: string): Promise<DriveRef>;
   folderExists(drive: DriveRef, folderPath: string): Promise<boolean>;
+  /** Files (not folders) directly inside a folder. */
+  listFiles(drive: DriveRef, folderPath: string): Promise<DriveItem[]>;
+  /** Moves a file into another existing folder. A name clash gets a numbered name, nothing is overwritten. */
+  moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void>;
   getItem(drive: DriveRef, path: string): Promise<DriveItem | null>;
   downloadItem(drive: DriveRef, itemId: string): Promise<Buffer>;
   uploadNew(drive: DriveRef, folderPath: string, fileName: string, content: Buffer): Promise<DriveItem>;
@@ -276,6 +282,26 @@ export class GraphClient implements GraphPort {
       if (e instanceof GraphError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  async listFiles(drive: DriveRef, folderPath: string): Promise<DriveItem[]> {
+    type Row = { id: string; name: string; size: number; webUrl?: string; lastModifiedDateTime?: string; file?: unknown };
+    const out: DriveItem[] = [];
+    let next: string | undefined = `/drives/${drive.driveId}/root:/${encodePath(folderPath)}:/children?$select=id,name,size,webUrl,lastModifiedDateTime,file&$top=200`;
+    for (let page = 0; next && page < 20; page++) {
+      const j: { value: Row[]; '@odata.nextLink'?: string } = await this.request('GET', next);
+      for (const r of j.value) if (r.file) out.push({ id: r.id, name: r.name, size: r.size, webUrl: r.webUrl, lastModified: r.lastModifiedDateTime });
+      next = j['@odata.nextLink'];
+    }
+    return out;
+  }
+
+  async moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void> {
+    const dest = await this.getItem(drive, destFolderPath);
+    if (!dest) throw new GraphError(`Folder "${destFolderPath}" not found`, 404, 'FolderNotFound');
+    await this.request('PATCH', `/drives/${drive.driveId}/items/${itemId}`, {
+      json: { parentReference: { id: dest.id }, '@microsoft.graph.conflictBehavior': 'rename' },
+    });
   }
 
   async folderExists(drive: DriveRef, folderPath: string): Promise<boolean> {

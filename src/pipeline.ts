@@ -78,6 +78,15 @@ type ItemResult =
 
 export type MessageStatus = 'ignored' | 'left_no_pdf' | 'left_unrecognised' | 'review' | 'moved' | 'partial' | 'dry_run';
 
+export interface DropOutcome {
+  file: string;
+  status: 'filed' | 'review' | 'dry_run' | 'retry';
+  detail: string[];
+}
+
+export const DROP_PROCESSED = 'Processed';
+export const DROP_REVIEW = 'Needs Review';
+
 export interface MessageOutcome {
   status: MessageStatus;
   detail: string[];
@@ -89,6 +98,8 @@ export class Pipeline {
   private bySender = new Map<string, ClientConfig>();
   /** Bills this process has already started for a given email and PDF, so a retry of the same email completes instead of being called a duplicate. */
   private touched = new Set<string>();
+  private dropDryRunSeen = new Set<string>();
+  private dropAttempts = new Map<string, number>();
   private targetCache = new Map<string, { at: number; drive: DriveRef; folderId: string }>();
   private readonly billsList: BillsList;
 
@@ -193,6 +204,102 @@ export class Pipeline {
       return { status: 'partial', detail: ['Some PDFs were saved, but the email also had a PDF that is not a bill or statement, so it stays in the inbox.'] };
     }
     return this.finishLeft(client, msg, 'left_unrecognised', others.map((o) => (o.kind === 'other' ? o.reason : '')).join(' '));
+  }
+
+  // -------------------------------------------------------------------------
+  // Drop folder: a PDF saved by hand into the client's drop folder
+  // -------------------------------------------------------------------------
+
+  dropClients(): ClientConfig[] {
+    return this.d.cfg.clients.filter((c) => c.sharepoint.dropFolder);
+  }
+
+  /** Looks at the drop folder once and handles every PDF in it. Files are only ever moved after everything for them succeeded. */
+  async processDrops(client: ClientConfig, maxFiles = 25): Promise<DropOutcome[]> {
+    const { graph } = this.d;
+    const folder = client.sharepoint.dropFolder;
+    if (!folder) return [];
+    const target = await this.ensureTargets(client);
+    for (const f of [folder, `${folder}/${DROP_PROCESSED}`, `${folder}/${DROP_REVIEW}`]) {
+      if (!(await graph.folderExists(target.drive, f))) {
+        throw new SystemicError(`SharePoint folder "${f}" does not exist for ${client.name}. Create it (the drop folder needs "${DROP_PROCESSED}" and "${DROP_REVIEW}" folders inside it).`);
+      }
+    }
+    const outcomes: DropOutcome[] = [];
+    const items = (await graph.listFiles(target.drive, folder)).sort((a, b) => a.name.localeCompare(b.name));
+    for (const item of items) {
+      if (outcomes.length >= maxFiles) break;
+      if (this.d.cfg.dryRun && this.dropDryRunSeen.has(item.id)) continue; // a dry run cannot move the file, so do not read it again
+      // A file still being uploaded is picked up on the next poll.
+      if (item.lastModified && Date.now() - Date.parse(item.lastModified) < 20_000) continue;
+      outcomes.push(await this.processDropItem(client, target, folder, item));
+      if (this.d.cfg.dryRun) this.dropDryRunSeen.add(item.id);
+    }
+    return outcomes;
+  }
+
+  private async processDropItem(client: ClientConfig, target: { drive: DriveRef }, folder: string, item: DriveItem): Promise<DropOutcome> {
+    const { graph, log, cfg } = this.d;
+    const msg: MailMessage = {
+      id: `drop:${item.id}`,
+      subject: `Drop folder: ${item.name}`,
+      receivedDateTime: item.lastModified ?? new Date(this.now()).toISOString(),
+      hasAttachments: true,
+      categories: [],
+    };
+    const att: MailAttachment = { id: item.id, name: item.name, contentType: 'application/pdf', size: item.size, isInline: false, odataType: '#microsoft.graph.fileAttachment' };
+    const dlog = { client: client.key, file: item.name };
+
+    const toReview = async (reasons: string[], ledger?: Partial<LedgerRow>): Promise<DropOutcome> => {
+      log.warn('Drop folder file needs review', { ...dlog, reasons });
+      if (cfg.dryRun) return { file: item.name, status: 'dry_run', detail: reasons };
+      await this.writeLedger(client, msg, 'Needs review (drop folder)', { ...ledger, notes: reasons.join(' | ') });
+      await this.d.alerter.alert(
+        `Bookkeeping: drop folder file needs a look (${client.name})`,
+        [
+          `Client: ${client.name}`,
+          `File: ${item.name}`,
+          '',
+          'Why it was not filed automatically:',
+          ...reasons.map((r) => `- ${r}`),
+          '',
+          `The file was moved to "${folder}/${DROP_REVIEW}". Fix the problem, then drag the file back into the drop folder to try again.`,
+        ].join('\n'),
+        `drop-review:${item.id}`,
+      );
+      await graph.moveItem(target.drive, item.id, `${folder}/${DROP_REVIEW}`);
+      this.dropAttempts.delete(item.id);
+      return { file: item.name, status: 'review', detail: reasons };
+    };
+
+    if (!/\.pdf$/i.test(item.name)) return toReview([`"${item.name}" is not a PDF. Only PDF files are processed.`]);
+
+    try {
+      if (item.size > 30 * 1024 * 1024) return await toReview([`"${item.name}" is larger than 30 MB.`]);
+      const buf = await graph.downloadItem(target.drive, item.id);
+      if (buf.length < 100 || buf.subarray(0, 5).toString('latin1') !== '%PDF-') return await toReview([`"${item.name}" is named like a PDF but is not a readable PDF file.`]);
+      const result = await this.processPdf(client, msg, att, buf, sha256(buf), target);
+
+      if (result.kind === 'planned') {
+        log.info(`Dry run result: would save "${result.fileName}". ${result.note}`, dlog);
+        return { file: item.name, status: 'dry_run', detail: [`Would save "${result.fileName}". ${result.note}`] };
+      }
+      if (result.kind === 'review') return await toReview(result.reasons, result.ledger);
+      if (result.kind === 'other') return await toReview([result.reason]);
+
+      await this.writeLedger(client, msg, 'Saved and filed (drop folder)', result.ledger);
+      await graph.moveItem(target.drive, item.id, `${folder}/${DROP_PROCESSED}`);
+      this.dropAttempts.delete(item.id);
+      log.info('Drop folder file filed', { ...dlog, filedAs: result.fileName });
+      return { file: item.name, status: 'filed', detail: [`${result.fileName}${result.note ? ` (${result.note})` : ''}`] };
+    } catch (e) {
+      if (e instanceof SystemicError) throw e;
+      const n = (this.dropAttempts.get(item.id) ?? 0) + 1;
+      this.dropAttempts.set(item.id, n);
+      log.error(`Drop folder file failed (attempt ${n}): ${errMsg(e)}`, { ...dlog, attempt: n, error: errMsg(e) });
+      if (n < 3) return { file: item.name, status: 'retry', detail: [errMsg(e)] };
+      return toReview([`The system failed 3 times on this file. Last error: ${errMsg(e)}`]);
+    }
   }
 
   // -------------------------------------------------------------------------

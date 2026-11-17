@@ -75,6 +75,11 @@ export const ClientSchema = z.object({
     /** true = file inside the existing month folder (October, 10 Oct, ...) under the folder above. Folders are never created. */
     monthFolders: z.boolean().default(false),
     /** Excel list in the billsFolder (year level) that gets one row per bill. */
+    /**
+     * Optional drop folder. A PDF saved here is processed like an emailed one (the folder decides the client).
+     * Two subfolders must already exist inside it: "Processed" (filed originals) and "Needs Review".
+     */
+    dropFolder: z.string().min(1).optional(),
     billsList: z.object({ fileName: z.string().default('Bills List.xlsx'), table: z.string().optional() }).optional(),
   }),
   xero: z.object({

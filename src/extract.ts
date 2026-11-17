@@ -22,6 +22,7 @@ export function parseJsonObjectText(text: string): unknown {
   let depth = 0;
   let inStr = false;
   let esc = false;
+  const stack: string[] = [];
   for (let i = start; i < text.length; i++) {
     const c = text[i];
     if (inStr) {
@@ -31,8 +32,11 @@ export function parseJsonObjectText(text: string): unknown {
       continue;
     }
     if (c === '"') inStr = true;
-    else if (c === '{') depth++;
+    else if (c === '{') { depth++; stack.push('}'); }
+    else if (c === '[') stack.push(']');
+    else if (c === ']') stack.pop();
     else if (c === '}') {
+      stack.pop();
       depth--;
       if (depth === 0) {
         try {
@@ -41,6 +45,17 @@ export function parseJsonObjectText(text: string): unknown {
           return undefined;
         }
       }
+    }
+  }
+  // The text stops before its closing brackets (the model occasionally drops the last "}").
+  // Close what is open and let the schema decide: a record missing any required field still fails validation,
+  // and the two independent readings must still agree.
+  if (!inStr && stack.length > 0 && stack.length <= 4) {
+    const body = text.slice(start).replace(/[,\s]+$/, '');
+    try {
+      return JSON.parse(body + stack.reverse().join(''));
+    } catch {
+      return undefined;
     }
   }
   return undefined;
@@ -64,7 +79,7 @@ export function normaliseToolInput(input: unknown): unknown {
   // A field that is allowed to be null but was left out means "not shown on the document".
   if (o.bill && typeof o.bill === 'object') {
     const b: Record<string, unknown> = { ...(o.bill as Record<string, unknown>) };
-    for (const k of ['bill_number', 'issue_date_printed', 'issue_date_iso', 'due_date_printed', 'due_date_iso', 'payment_terms_days', 'currency', 'subtotal_ex_gst', 'total_gst', 'total_inc_gst']) {
+    for (const k of ['bill_number', 'issue_date_printed', 'issue_date_iso', 'due_date_printed', 'due_date_iso', 'payment_terms_days', 'currency', 'subtotal_ex_gst']) {
       if (b[k] === undefined) b[k] = null;
     }
     if (Array.isArray(b.lines)) {
@@ -84,6 +99,39 @@ export function normaliseToolInput(input: unknown): unknown {
   }
   return o;
 }
+
+/** True when the bill object came back without its GST or grand total (cut-off output). null is a real answer; absent is not. */
+export function billMissingTotals(normalised: unknown): boolean {
+  const b = (normalised as { bill?: unknown } | null)?.bill;
+  if (!b || typeof b !== 'object') return false;
+  const o = b as Record<string, unknown>;
+  return o.total_gst === undefined || o.total_inc_gst === undefined;
+}
+
+export function mergeTotals(normalised: unknown, totals: { subtotal_ex_gst?: unknown; total_gst: unknown; total_inc_gst: unknown }): unknown {
+  const root = { ...(normalised as Record<string, unknown>) };
+  const bill: Record<string, unknown> = { ...(root.bill as Record<string, unknown>) };
+  bill.total_gst = totals.total_gst;
+  bill.total_inc_gst = totals.total_inc_gst;
+  if (bill.subtotal_ex_gst === null || bill.subtotal_ex_gst === undefined) bill.subtotal_ex_gst = totals.subtotal_ex_gst ?? null;
+  root.bill = bill;
+  return root;
+}
+
+const TOTALS_TOOL = {
+  name: 'record_totals',
+  description: 'Record the totals printed on the invoice.',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['subtotal_ex_gst', 'total_gst', 'total_inc_gst'],
+    properties: {
+      subtotal_ex_gst: { type: ['number', 'null'], description: 'Printed total before GST, null if not printed.' },
+      total_gst: { type: ['number', 'null'], description: 'Total GST printed on the invoice. 0 if the invoice shows no GST. Null only if no GST figure is printed anywhere.' },
+      total_inc_gst: { type: ['number', 'null'], description: 'The invoice total including GST, before payments. Totals are often in a box at the bottom of the LAST page.' },
+    },
+  },
+} as const;
 
 const nullableString = { type: ['string', 'null'] } as const;
 const nullableNumber = { type: ['number', 'null'] } as const;
@@ -186,7 +234,8 @@ Rules:
 - Amounts are plain numbers in dollars with no symbols or thousands separators.
 - Australian GST is 10%. Mark each line gst_applicable from what the document shows (GST column, markers, notes) and make sure total_gst is the GST printed on the document.
 - The supplier is the business being paid, the customer is the business billed. Do not mix them up.
-- If the PDF is not a supplier bill or a statement, set document_type to other and leave bill and statement null.`;
+- If the PDF is not a supplier bill or a statement, set document_type to other and leave bill and statement null.
+- Pass bill and statement as real JSON objects, never as text. Include every field of the bill, including subtotal_ex_gst, total_gst and total_inc_gst. On multi-page invoices the totals are usually in a box at the bottom of the last page, so read every page.`;
 
 export class ExtractionError extends Error {}
 
@@ -216,6 +265,33 @@ export class ClaudeExtractor implements Extractor {
       }
     }
     throw last;
+  }
+
+  /** Focused second look for the totals when the main record came back without them. */
+  private async readTotals(pdf: Buffer): Promise<{ subtotal_ex_gst: unknown; total_gst: unknown; total_inc_gst: unknown }> {
+    const res = await this.client.messages.create({
+      model: this.model,
+      max_tokens: 1000,
+      system: SYSTEM_PROMPT,
+      tools: [{ name: TOTALS_TOOL.name, description: TOTALS_TOOL.description, input_schema: TOTALS_TOOL.input_schema as unknown as Anthropic.Tool.InputSchema }],
+      tool_choice: { type: 'auto' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') } },
+            { type: 'text', text: `Read every page of this invoice and respond only by calling ${TOTALS_TOOL.name} with the printed totals.` },
+          ],
+        },
+      ],
+    });
+    const block = res.content.find((b) => b.type === 'tool_use' && b.name === TOTALS_TOOL.name);
+    const inp = block && block.type === 'tool_use' ? (block.input as Record<string, unknown> | null) : null;
+    const ok = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v));
+    if (!inp || !ok(inp.total_gst) || !ok(inp.total_inc_gst) || inp.total_gst === undefined || inp.total_inc_gst === undefined) {
+      throw new ExtractionError('The invoice totals could not be read on the second look.');
+    }
+    return { subtotal_ex_gst: inp.subtotal_ex_gst, total_gst: inp.total_gst, total_inc_gst: inp.total_inc_gst };
   }
 
   private async extractOnce(pdf: Buffer): Promise<Extraction> {
@@ -251,7 +327,8 @@ export class ClaudeExtractor implements Extractor {
     if (res.stop_reason === 'max_tokens') {
       throw new ExtractionError('Claude output was cut off before the structured record completed.');
     }
-    const input = normaliseToolInput(block.input);
+    let input = normaliseToolInput(block.input);
+    if (billMissingTotals(input)) input = mergeTotals(input, await this.readTotals(pdf));
     const parsed = ExtractionSchema.safeParse(input);
     if (!parsed.success) {
       const raw = block.input as Record<string, unknown> | null;

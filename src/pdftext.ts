@@ -5,15 +5,23 @@ export interface PdfText {
   /** Visual lines of page 1, top to bottom. */
   page1Lines: string[];
   page1Text: string;
+  /**
+   * Pieces of the first few visual lines, split where a wide horizontal gap separates columns.
+   * A heading that shares a row with another column ("STATEMENT   31 Oct 2026") shows up here on its own.
+   */
+  page1Segments?: string[];
   /** True when the PDF carries a usable text layer (false for scans/photos). */
   hasText: boolean;
 }
+
+const SEGMENT_ROWS = 8;
 
 interface Item {
   str: string;
   x: number;
   y: number;
   h: number;
+  w: number;
 }
 
 /**
@@ -33,7 +41,7 @@ export async function readPdfText(buf: Buffer): Promise<PdfText> {
       const str = typeof it.str === 'string' ? it.str : '';
       const tr = it.transform as number[] | undefined;
       if (!str.trim() || !tr || tr.length < 6) continue;
-      items.push({ str, x: tr[4] ?? 0, y: tr[5] ?? 0, h: Math.abs(tr[3] ?? 0) || 10 });
+      items.push({ str, x: tr[4] ?? 0, y: tr[5] ?? 0, h: Math.abs(tr[3] ?? 0) || 10, w: typeof it.width === 'number' ? it.width : 0 });
     }
 
     // Top to bottom, then left to right.
@@ -62,8 +70,27 @@ export async function readPdfText(buf: Buffer): Promise<PdfText> {
       )
       .filter(Boolean);
 
+    // Split the top rows into column pieces. Only the top rows: further down, table rows would
+    // produce pieces like "Invoice 123" that are not headings.
+    const page1Segments: string[] = [];
+    for (const l of lines.slice(0, SEGMENT_ROWS)) {
+      const sorted = [...l].sort((a, b) => a.x - b.x);
+      let cur: string[] = [];
+      let prevEnd = Number.NEGATIVE_INFINITY;
+      for (const it of sorted) {
+        const gap = it.x - prevEnd;
+        if (cur.length && gap > Math.max(it.h * 2, 18)) {
+          page1Segments.push(cur.join(' ').replace(/\s+/g, ' ').trim());
+          cur = [];
+        }
+        cur.push(it.str.trim());
+        prevEnd = it.x + it.w;
+      }
+      if (cur.length) page1Segments.push(cur.join(' ').replace(/\s+/g, ' ').trim());
+    }
+
     const page1Text = page1Lines.join('\n');
-    return { pageCount, page1Lines, page1Text, hasText: page1Text.replace(/\s/g, '').length >= 20 };
+    return { pageCount, page1Lines, page1Segments: page1Segments.filter(Boolean), page1Text, hasText: page1Text.replace(/\s/g, '').length >= 20 };
   } finally {
     await (pdf as unknown as { destroy?: () => Promise<void> }).destroy?.();
   }

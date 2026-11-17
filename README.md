@@ -17,6 +17,14 @@ The service checks `bookkeeping@srperks.com.au` every minute. Only mail from a c
 
 The email is moved only after **everything** for it has succeeded (SharePoint, Xero draft, PDF attached to the draft). If Xero is down, the email stays in the inbox and the next poll completes the job without creating duplicates.
 
+## Drop folder (older emails from any sender)
+
+Set `dropFolder` in a client's `sharepoint` block (a folder that does not depend on the financial year). Inside it, create two folders: `Processed` and `Needs Review`. A person saves PDFs from old emails into the drop folder. Within about a minute the service reads each PDF exactly as it would an emailed one: same heading checks, renaming, financial-year and month folder (from the bill's own date), Bills List row, Xero draft and duplicate checks. The folder decides the client, so the sender does not matter.
+
+- Filed successfully: the original moves to `Processed`.
+- Duplicate, unreadable, not a bill or statement, not a PDF, or anything else that needs a person: the file moves to `Needs Review` and an alert email says why. Fix the problem and drag it back into the drop folder to retry.
+- Files modified in the last 20 seconds are skipped, so a file still uploading is not read half-finished. Nothing is ever overwritten or deleted.
+
 ## Where files go (financial-year and month folders)
 
 `billsFolder` and `statementsFolder` are templates. `{FY}` becomes the Australian financial-year folder, named by the year the FY ends: bills from 1 Jul 2026 to 30 Jun 2027 go in `2027`, and a bill dated 1 Jul 2027 goes in `2028`, never `2027`. With `monthFolders: true` the file goes in the existing month folder inside it (October, Oct 2026, 10 October and similar names are recognised). The month is the bill's issue date (statements: the as-at date).
@@ -113,6 +121,6 @@ npm run extract -- file.pdf   # accuracy tester, no side effects
 npm run xero:auth             # one-time Xero authorisation (both organisations)
 npm run preflight             # verify all connections and destinations
 npm run make-log-template     # create the Excel log
-npm test                      # 105 automated tests
+npm test                      # 111 automated tests
 npm run build && npm start    # production
 ```

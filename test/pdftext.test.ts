@@ -39,3 +39,16 @@ test('a PDF with no text layer reports hasText=false', async () => {
   const t = await readPdfText(pdf);
   assert.equal(t.hasText, false);
 });
+
+test('a heading that shares a row with another column is still found', async () => {
+  const pdf = await makePdf([
+    { text: 'Happy Beans Coffee Pty', x: 40, y: 60 },
+    { text: 'STATEMENT', x: 40, y: 100, size: 22 },
+    { text: '31 Oct 2026 Ltd', x: 380, y: 100, size: 22 },
+    { text: 'Harcourt Produce', x: 40, y: 140 },
+    { text: '22 Oct 2026 Invoice # OMI3480 660.00', x: 40, y: 300 },
+  ]);
+  const t = await readPdfText(pdf);
+  assert.ok(t.page1Segments?.includes('STATEMENT'));
+  assert.equal(classifyLines([...t.page1Lines, ...(t.page1Segments ?? [])], DEFAULT_RULES), 'statement');
+});

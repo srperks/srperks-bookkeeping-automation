@@ -172,8 +172,8 @@ function titleToken(t: string): string {
 
 /**
  * Supplier names are shown the way a person would write them: "FLICK ANTICIMEX PTY LTD" and
- * "Flick Anticimex PTY LTD" both become "Flick Anticimex Pty Ltd". A name that already mixes
- * upper and lower case is left alone apart from the legal forms (Pty, Ltd and so on).
+ * "Flick Anticimex PTY LTD" both become "Flick Anticimex Pty Ltd". In a name that mixes cases,
+ * shouting words and all-lowercase words are fixed and deliberate mixed-case words are kept.
  */
 export function properName(name: string): string {
   const words = name.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
@@ -184,11 +184,16 @@ export function properName(name: string): string {
       const trail = w.slice(bare.length);
       const legal = LEGAL_FORMS[bare];
       if (legal) return legal + trail;
-      if (!allCaps) return w;
       const upper = w.toUpperCase().replace(/[.,]+$/g, '');
       if (KEEP_UPPER.has(upper)) return w;
       if (i > 0 && SMALL_WORDS.has(bare)) return w.toLowerCase();
-      return titleToken(w);
+      if (allCaps) return titleToken(w);
+      // Mixed-case name: fix shouting words (over 3 letters) and all-lowercase words.
+      // Words that mix cases on purpose (McDonald, iPhone) and short capitals (BP, JB) are left alone.
+      const letters = w.replace(/[^A-Za-z]/g, '');
+      const shouting = letters.length > 3 && letters === letters.toUpperCase();
+      const lowerOnly = letters.length > 0 && letters === letters.toLowerCase();
+      return shouting || lowerOnly ? titleToken(w) : w;
     })
     .join(' ');
 }
