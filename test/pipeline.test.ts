@@ -700,6 +700,142 @@ test('drop folder: a dry run writes and moves nothing, and does not read the sam
 });
 
 test('drop folder: a client without a drop folder is not touched', async () => {
+  process.env.WATCH_DROP_FOLDERS = 'true';
+  try {
+    const t = setupDrop();
+    assert.deepEqual(t.pipeline.dropClients().map((c) => c.key), ['hopper']);
+  } finally {
+    delete process.env.WATCH_DROP_FOLDERS;
+  }
+});
+
+test('drop folder: the email service ignores drop folders unless WATCH_DROP_FOLDERS=true', async () => {
+  delete process.env.WATCH_DROP_FOLDERS;
   const t = setupDrop();
-  assert.deepEqual(t.pipeline.dropClients().map((c) => c.key), ['hopper']);
+  assert.deepEqual(t.pipeline.dropClients(), []);
+  assert.deepEqual(t.pipeline.configuredDropFolders(), ['Hopper Joint Melbourne']);
+});
+
+// ---------------------------------------------------------------------------
+// Supplier credit notes
+// ---------------------------------------------------------------------------
+
+async function creditPdf(tag: string, heading = 'TAX CREDIT NOTE') {
+  return makePdf([{ text: 'Acme Foods Pty Ltd', y: 60 }, { text: heading, y: 110, size: 22 }, { text: `Credit Note No ${tag}`, y: 150 }, { text: 'Total 55.00', y: 200 }]);
+}
+function creditExtraction() {
+  const ex = billExtraction({ document_heading: 'TAX CREDIT NOTE', document_type: 'credit_note' });
+  ex.bill = {
+    ...ex.bill!,
+    bill_number: 'CN-77',
+    issue_date_printed: '14/10/2026',
+    issue_date_iso: '2026-10-14',
+    due_date_printed: null,
+    due_date_iso: null,
+    lines: [{ description: 'Damaged buns returned', quantity: 10, unit_price: 5, line_amount: 50, gst_applicable: true }],
+    subtotal_ex_gst: 50,
+    total_gst: 5,
+    total_inc_gst: 55,
+  };
+  return ex;
+}
+
+test('credit note: filed with its own name, a DRAFT credit note (not a bill) is created in Xero with the PDF attached', async () => {
+  const t = setup();
+  const pdf = await creditPdf('CN-77');
+  t.extractor.on(pdf, creditExtraction());
+  const out = await t.pipeline.processMessage(t.graph.addMessage('c1', HOPPER, [{ name: 'cn.pdf', buf: pdf }]));
+
+  assert.equal(out.status, 'moved');
+  assert.deepEqual(t.graph.filesIn('Hopper/Bills'), ['14 10 2026 - Acme Foods Pty Ltd - Credit Note CN-77.pdf']);
+  assert.equal(t.xero.bills.length, 0);
+  assert.equal(t.xero.credits.length, 1);
+  const c = t.xero.credits[0]!;
+  assert.equal(c.status, 'DRAFT');
+  assert.equal(c.input!.invoiceNumber, 'CN-77');
+  assert.equal(c.input!.dueDate, null);
+  assert.equal(c.total, 55);
+  assert.deepEqual(c.attachments, ['14 10 2026 - Acme Foods Pty Ltd - Credit Note CN-77.pdf']);
+  assert.match(t.ledger.rows[0]!.docType, /credit note/i);
+});
+
+test('credit note: the Bills List row is negative and labelled as a credit note', async () => {
+  const t = setupFy();
+  const pdf = await creditPdf('CN-77');
+  t.extractor.on(pdf, creditExtraction());
+  const out = await t.pipeline.processMessage(t.graph.addMessage('c2', HOPPER, [{ name: 'cn.pdf', buf: pdf }]));
+  assert.equal(out.status, 'moved');
+  assert.deepEqual(t.graph.filesIn('Clients/HOP/2027/Bookkeeping/Accounts Payable/October'), ['14 10 2026 - Acme Foods Pty Ltd - Credit Note CN-77.pdf']);
+  const rows = t.graph.tables.get('Clients/HOP/2027/Bookkeeping/Accounts Payable/Bills List.xlsx')![0]!.rows;
+  assert.deepEqual(rows, [['Acme Foods Pty Ltd', 'Credit Note CN-77', '2026-10-14', null, -50, -5, -55]]);
+});
+
+test('credit note: a second copy is flagged DUPLICATE and nothing new is created', async () => {
+  const t = setup();
+  const pdf = await creditPdf('CN-77');
+  t.extractor.on(pdf, creditExtraction());
+  assert.equal((await t.pipeline.processMessage(t.graph.addMessage('c3', HOPPER, [{ name: 'cn.pdf', buf: pdf }]))).status, 'moved');
+  const again = await t.pipeline.processMessage(t.graph.addMessage('c4', HOPPER, [{ name: 'cn.pdf', buf: pdf }]));
+  assert.equal(again.status, 'review');
+  assert.match(again.detail.join(' '), /DUPLICATE CREDIT NOTE/);
+  assert.equal(t.xero.credits.length, 1);
+});
+
+test('credit note and an invoice with the same number do not block each other', async () => {
+  const t = setup();
+  const inv = await billPdf('CN-77');
+  const invEx = billExtraction();
+  invEx.bill!.bill_number = 'CN-77';
+  t.extractor.on(inv, invEx);
+  const cn = await creditPdf('CN-77');
+  t.extractor.on(cn, creditExtraction());
+  assert.equal((await t.pipeline.processMessage(t.graph.addMessage('c5', HOPPER, [{ name: 'inv.pdf', buf: inv }]))).status, 'moved');
+  assert.equal((await t.pipeline.processMessage(t.graph.addMessage('c6', HOPPER, [{ name: 'cn.pdf', buf: cn }]))).status, 'moved');
+  assert.equal(t.xero.bills.length, 1);
+  assert.equal(t.xero.credits.length, 1);
+});
+
+test('credit note: a negative or zero total goes to review (never filed as a draft)', async () => {
+  const t = setup();
+  const pdf = await creditPdf('CN-78');
+  const ex = creditExtraction();
+  ex.bill!.lines[0]!.line_amount = -50;
+  ex.bill!.subtotal_ex_gst = -50;
+  ex.bill!.total_gst = -5;
+  ex.bill!.total_inc_gst = -55;
+  t.extractor.on(pdf, ex);
+  const out = await t.pipeline.processMessage(t.graph.addMessage('c7', HOPPER, [{ name: 'cn.pdf', buf: pdf }]));
+  assert.equal(out.status, 'review');
+  assert.equal(t.xero.credits.length, 0);
+});
+
+test('credit note: Claude says credit note but the PDF text says tax invoice, so it stops for review', async () => {
+  const t = setup();
+  const pdf = await billPdf('X-1');
+  t.extractor.on(pdf, creditExtraction());
+  const out = await t.pipeline.processMessage(t.graph.addMessage('c8', HOPPER, [{ name: 'x.pdf', buf: pdf }]));
+  assert.equal(out.status, 'review');
+  assert.equal(t.xero.credits.length, 0);
+  assert.equal(t.xero.bills.length, 0);
+});
+
+test('credit note: dry run plans it as a draft credit note and writes nothing', async () => {
+  const t = setup({ dryRun: true });
+  const pdf = await creditPdf('CN-79');
+  t.extractor.on(pdf, creditExtraction());
+  const out = await t.pipeline.processMessage(t.graph.addMessage('c9', HOPPER, [{ name: 'cn.pdf', buf: pdf }]));
+  assert.equal(out.status, 'dry_run');
+  assert.match(out.detail.join(' '), /Draft credit note CN-77/);
+  assert.equal(t.xero.credits.length, 0);
+});
+
+test('credit note dropped in the drop folder is filed and the original moves to Processed', async () => {
+  const t = setupDrop();
+  const pdf = await creditPdf('CN-80');
+  t.extractor.on(pdf, creditExtraction());
+  t.graph.files.set('Hopper/Drop/credit.pdf', pdf);
+  const out = await t.pipeline.processDrops(t.hopper);
+  assert.deepEqual(out.map((o) => o.status), ['filed']);
+  assert.equal(t.xero.credits.length, 1);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop/Processed'), ['credit.pdf']);
 });

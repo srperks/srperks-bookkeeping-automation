@@ -124,3 +124,12 @@ npm run make-log-template     # create the Excel log
 npm test                      # 111 automated tests
 npm run build && npm start    # production
 ```
+
+## Supplier credit notes
+
+A PDF headed "Credit Note", "Tax Credit Note", "Supplier Credit Note" or "Adjustment Note" is handled like a bill, with the same checks (two readings must agree, totals and GST must add up, duplicates are caught):
+
+- Filed in the same month folder as bills, named `DD MM YYYY - Supplier - Credit Note <number>.pdf`.
+- Created in Xero as a DRAFT supplier credit note (never approved, never applied to a bill: a person does that), with the PDF attached.
+- Added to the Bills List as `Credit Note <number>` with negative amounts.
+- A PDF that shows both an invoice and a credit note heading, or a negative total, goes to review.

@@ -36,7 +36,7 @@ export const StatementSchema = z.object({
 
 export const ExtractionSchema = z.object({
   document_heading: z.string(),
-  document_type: z.enum(['bill', 'statement', 'other']),
+  document_type: z.enum(['bill', 'statement', 'credit_note', 'other']),
   confidence: z.enum(['high', 'medium', 'low']),
   invoice_count: z.number().int().min(0),
   supplier_name: z.string().nullable(),
@@ -96,8 +96,11 @@ export const ClientsFileSchema = z.object({
     .object({
       extraBillHeadings: z.array(z.string()).default([]),
       extraStatementHeadings: z.array(z.string()).default([]),
+      extraCreditHeadings: z.array(z.string()).default([]),
+      /** Suppliers (part of the name) whose invoices print no invoice date: the ORDER DATE is used as the issue date. */
+      orderDateSuppliers: z.array(z.string()).default([]),
     })
-    .default({ extraBillHeadings: [], extraStatementHeadings: [] }),
+    .default({ extraBillHeadings: [], extraStatementHeadings: [], extraCreditHeadings: [], orderDateSuppliers: [] }),
   allowedCurrencies: z.array(z.string()).default(['AUD']),
   log: z
     .object({
@@ -113,4 +116,4 @@ export const ClientsFileSchema = z.object({
 export type ClientConfig = z.infer<typeof ClientSchema>;
 export type ClientsFile = z.infer<typeof ClientsFileSchema>;
 
-export type DocKind = 'bill' | 'statement';
+export type DocKind = 'bill' | 'statement' | 'credit';

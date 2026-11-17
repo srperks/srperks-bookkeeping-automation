@@ -38,18 +38,20 @@ export interface ResolvedBill {
 export function validateBill(
   ex: Extraction,
   ctx: ValidateContext,
+  opts: { credit?: boolean } = {},
 ): { issues: string[]; resolved: ResolvedBill | null } {
   const issues: string[] = [];
   const b = ex.bill;
+  const word = opts.credit ? 'Credit note' : 'Bill';
 
   if (!ex.supplier_name || ex.supplier_name.trim().length < 2) issues.push('Supplier name not found.');
   if (!b) return { issues: [...issues, 'No bill details were extracted.'], resolved: null };
-  if (!b.bill_number || !b.bill_number.trim()) issues.push('Supplier bill number not found.');
+  if (!b.bill_number || !b.bill_number.trim()) issues.push(opts.credit ? 'Credit note number not found.' : 'Supplier bill number not found.');
 
   // ----- dates -----
   let issueDate: string | null = null;
   if (!isValidIsoDate(b.issue_date_iso)) {
-    issues.push('Bill issue date missing or invalid.');
+    issues.push(`${word} issue date missing or invalid.`);
   } else {
     issueDate = b.issue_date_iso;
     const printed = parsePrintedDate(b.issue_date_printed);
@@ -102,7 +104,7 @@ export function validateBill(
     const gstLines = b.lines.filter((l) => l.gst_applicable);
     const tol = gstTolerance(b.lines.length);
 
-    if (totalInc <= 0) issues.push(`Total ${totalInc.toFixed(2)} is zero or negative (credit note or misread).`);
+    if (totalInc <= 0) issues.push(opts.credit ? `Credit note total ${totalInc.toFixed(2)} is zero or negative (it should be read as a positive amount).` : `Total ${totalInc.toFixed(2)} is zero or negative (credit note or misread).`);
     if (totalGst < 0) issues.push('GST amount is negative.');
 
     if (!b.line_amounts_include_gst) {

@@ -56,9 +56,17 @@ export interface XeroPort {
   /** Every purchase bill with this number under any contact (used to catch a bill already entered under another supplier). */
   findBillsByNumber(tenantId: string, billNumber: string): Promise<XeroBill[]>;
   createDraftBill(tenantId: string, bill: DraftBillInput, idempotencyKey: string): Promise<XeroBill>;
-  hasAttachment(tenantId: string, invoiceId: string, fileName: string): Promise<boolean>;
-  uploadAttachment(tenantId: string, invoiceId: string, fileName: string, content: Buffer): Promise<void>;
+  /** Supplier credit notes (ACCPAYCREDIT). The result reuses XeroBill: invoiceId is the credit note id, invoiceNumber its number. */
+  findCreditNote(tenantId: string, contactId: string, creditNumber: string, reference?: string): Promise<XeroBill | null>;
+  findCreditNotesByNumber(tenantId: string, creditNumber: string): Promise<XeroBill[]>;
+  createDraftCreditNote(tenantId: string, credit: DraftBillInput, idempotencyKey: string): Promise<XeroBill>;
+  hasAttachment(tenantId: string, invoiceId: string, fileName: string, doc?: XeroDoc): Promise<boolean>;
+  uploadAttachment(tenantId: string, invoiceId: string, fileName: string, content: Buffer, doc?: XeroDoc): Promise<void>;
 }
+
+/** Which Xero endpoint a document lives under. */
+export type XeroDoc = 'invoice' | 'credit';
+const docPath = (doc: XeroDoc): string => (doc === 'credit' ? 'CreditNotes' : 'Invoices');
 
 // ---------------------------------------------------------------------------
 // Tokens: Xero refresh tokens are single use and rotate, so every refresh must be saved
@@ -419,14 +427,84 @@ export class XeroClient implements XeroPort {
     return this.toBill(inv);
   }
 
-  async hasAttachment(tenantId: string, invoiceId: string, fileName: string): Promise<boolean> {
-    const j = await this.call<{ Attachments?: Array<{ FileName: string }> }>(tenantId, 'GET', `/Invoices/${invoiceId}/Attachments`);
+  // ----- supplier credit notes -----
+  private toCredit(c: Record<string, unknown>): XeroBill {
+    return {
+      invoiceId: String(c.CreditNoteID),
+      invoiceNumber: String(c.CreditNoteNumber ?? ''),
+      status: String(c.Status ?? ''),
+      total: Number(c.Total ?? 0),
+      totalTax: Number(c.TotalTax ?? 0),
+      contactId: String((c.Contact as { ContactID?: string } | undefined)?.ContactID ?? ''),
+      reference: String(c.Reference ?? ''),
+    };
+  }
+
+  private static readonly LIVE_CREDIT = new Set(['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID']);
+
+  async findCreditNote(tenantId: string, contactId: string, creditNumber: string, reference?: string): Promise<XeroBill | null> {
+    const hits = (await this.findCreditNotesByNumber(tenantId, creditNumber)).filter(
+      (c) => c.contactId === contactId && (reference === undefined || (c.reference ?? '') === reference.slice(0, 255)),
+    );
+    return hits[0] ?? null;
+  }
+
+  async findCreditNotesByNumber(tenantId: string, creditNumber: string): Promise<XeroBill[]> {
+    const wanted = normaliseDocNumber(creditNumber);
+    const safe = creditNumber.trim().replace(/"/g, '');
+    const out: XeroBill[] = [];
+    for (let page = 1; page < 20; page++) {
+      const j = await this.call<{ CreditNotes?: Array<Record<string, unknown>> }>(tenantId, 'GET', '/CreditNotes', {
+        query: { where: `Type=="ACCPAYCREDIT"&&CreditNoteNumber=="${safe}"`, page: String(page) },
+      });
+      const rows = j.CreditNotes ?? [];
+      for (const c of rows) {
+        if (normaliseDocNumber(String(c.CreditNoteNumber ?? '')) === wanted && XeroClient.LIVE_CREDIT.has(String(c.Status ?? ''))) out.push(this.toCredit(c));
+      }
+      if (rows.length < 100) break;
+    }
+    return out;
+  }
+
+  async createDraftCreditNote(tenantId: string, credit: DraftBillInput, idempotencyKey: string): Promise<XeroBill> {
+    const payload = {
+      Type: 'ACCPAYCREDIT',
+      Status: 'DRAFT', // never anything else, and never applied to a bill: a human does that
+      Contact: { ContactID: credit.contactId },
+      Date: credit.issueDate,
+      CreditNoteNumber: credit.invoiceNumber,
+      ...(credit.reference ? { Reference: credit.reference.slice(0, 255) } : {}),
+      CurrencyCode: credit.currency,
+      LineAmountTypes: credit.amountsIncludeGst ? 'Inclusive' : 'Exclusive',
+      LineItems: credit.lines.map((l) => ({
+        Description: l.description,
+        Quantity: l.quantity,
+        UnitAmount: l.unitAmount,
+        LineAmount: l.lineAmount,
+        TaxType: l.taxType,
+        TaxAmount: l.taxAmount,
+        ...(l.accountCode ? { AccountCode: l.accountCode } : {}),
+      })),
+    };
+    const j = await this.call<{ CreditNotes?: Array<Record<string, unknown>> }>(tenantId, 'POST', '/CreditNotes', {
+      json: { CreditNotes: [payload] },
+      headers: { 'Idempotency-Key': idempotencyKey.slice(0, 128) },
+    });
+    const cn = j.CreditNotes?.[0];
+    if (!cn) throw new XeroError('Xero returned no credit note after create', 500, true);
+    const errs = (cn.ValidationErrors as Array<{ Message: string }> | undefined)?.map((e) => e.Message);
+    if (errs?.length) throw new XeroError(`Xero rejected the draft credit note: ${errs.join('; ')}`, 400, false);
+    return this.toCredit(cn);
+  }
+
+  async hasAttachment(tenantId: string, invoiceId: string, fileName: string, doc: XeroDoc = 'invoice'): Promise<boolean> {
+    const j = await this.call<{ Attachments?: Array<{ FileName: string }> }>(tenantId, 'GET', `/${docPath(doc)}/${invoiceId}/Attachments`);
     return (j.Attachments ?? []).some((a) => a.FileName.toLowerCase() === fileName.toLowerCase());
   }
 
-  async uploadAttachment(tenantId: string, invoiceId: string, fileName: string, content: Buffer): Promise<void> {
+  async uploadAttachment(tenantId: string, invoiceId: string, fileName: string, content: Buffer, doc: XeroDoc = 'invoice'): Promise<void> {
     if (content.length > 10 * 1024 * 1024) throw new XeroError('PDF is larger than Xero\'s 10 MB attachment limit.', 400, false);
-    await this.call(tenantId, 'PUT', `/Invoices/${invoiceId}/Attachments/${encodeURIComponent(fileName)}`, {
+    await this.call(tenantId, 'PUT', `/${docPath(doc)}/${invoiceId}/Attachments/${encodeURIComponent(fileName)}`, {
       body: content,
       headers: { 'Content-Type': 'application/pdf' },
     });

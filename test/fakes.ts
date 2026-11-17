@@ -125,6 +125,7 @@ export class FakeGraph implements GraphPort {
 export class FakeXero implements XeroPort {
   contacts = new Map<string, XeroContact[]>();
   bills: Array<XeroBill & { tenant: string; attachments: string[]; input?: DraftBillInput }> = [];
+  credits: Array<XeroBill & { tenant: string; attachments: string[]; input?: DraftBillInput }> = [];
   failCreateOnce: XeroError | null = null;
   readyCalls = 0;
   contactsCreated: string[] = [];
@@ -180,11 +181,42 @@ export class FakeXero implements XeroPort {
     return b;
   }
 
+  async findCreditNote(tenant: string, contactId: string, num: string, reference?: string) {
+    return this.credits.find((b) => b.tenant === tenant && b.contactId === contactId && normaliseDocNumber(b.invoiceNumber) === normaliseDocNumber(num) && (reference === undefined || b.reference === reference)) ?? null;
+  }
+  async findCreditNotesByNumber(tenant: string, num: string) {
+    return this.credits.filter((b) => b.tenant === tenant && normaliseDocNumber(b.invoiceNumber) === normaliseDocNumber(num));
+  }
+  async createDraftCreditNote(tenant: string, credit: DraftBillInput): Promise<XeroBill> {
+    if (this.failCreateOnce) {
+      const e = this.failCreateOnce;
+      this.failCreateOnce = null;
+      throw e;
+    }
+    const c = {
+      tenant,
+      invoiceId: `cn-${this.credits.length + 1}`,
+      invoiceNumber: credit.invoiceNumber,
+      status: 'DRAFT',
+      total: this.totalOverride ?? credit.expectedTotal,
+      totalTax: credit.expectedGst,
+      contactId: credit.contactId,
+      reference: credit.reference ?? '',
+      attachments: [] as string[],
+      input: credit,
+    };
+    this.credits.push(c);
+    return c;
+  }
+
+  private doc(id: string) {
+    return (id.startsWith('cn-') ? this.credits : this.bills).find((b) => b.invoiceId === id)!;
+  }
   async hasAttachment(_t: string, invoiceId: string, fileName: string) {
-    return this.bills.find((b) => b.invoiceId === invoiceId)!.attachments.includes(fileName);
+    return this.doc(invoiceId).attachments.includes(fileName);
   }
   async uploadAttachment(_t: string, invoiceId: string, fileName: string) {
-    this.bills.find((b) => b.invoiceId === invoiceId)!.attachments.push(fileName);
+    this.doc(invoiceId).attachments.push(fileName);
   }
 }
 

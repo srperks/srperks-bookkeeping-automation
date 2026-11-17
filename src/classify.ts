@@ -1,24 +1,36 @@
 import type { Extraction, DocKind } from './types.js';
+
+const docTypeOf = (k: DocKind): Extraction['document_type'] => (k === 'credit' ? 'credit_note' : k);
 import type { PdfText } from './pdftext.js';
 
-export type HeadingKind = 'bill' | 'statement' | 'none' | 'ambiguous';
+export type HeadingKind = 'bill' | 'statement' | 'credit' | 'none' | 'ambiguous';
+
+const isDocKind = (k: HeadingKind | null): k is DocKind => k === 'bill' || k === 'statement' || k === 'credit';
 
 export interface HeadingRules {
   billHeadings: string[];
   statementHeadings: string[];
+  creditHeadings: string[];
 }
 
 /** Exactly the headings in the brief. Extras can be added in config/rules, never silently. */
 export const DEFAULT_RULES: HeadingRules = {
   billHeadings: ['tax invoice', 'supplier bill', 'bill'],
   statementHeadings: ['statement', 'client statement', 'debtor statement'],
+  creditHeadings: ['credit note', 'tax credit note', 'supplier credit note', 'adjustment note', 'tax adjustment note', 'credit memo'],
 };
 
-export function buildRules(extraBill: string[] = [], extraStatement: string[] = []): HeadingRules {
+const phrasesOf = (kind: DocKind, rules: HeadingRules): string[] =>
+  kind === 'bill' ? rules.billHeadings : kind === 'statement' ? rules.statementHeadings : rules.creditHeadings;
+const phrasesNotOf = (kind: DocKind, rules: HeadingRules): string[] =>
+  (['bill', 'statement', 'credit'] as const).filter((k) => k !== kind).flatMap((k) => phrasesOf(k, rules));
+
+export function buildRules(extraBill: string[] = [], extraStatement: string[] = [], extraCredit: string[] = []): HeadingRules {
   const norm = (a: string[]) => a.map(normLine).filter(Boolean);
   return {
     billHeadings: [...DEFAULT_RULES.billHeadings, ...norm(extraBill)],
     statementHeadings: [...DEFAULT_RULES.statementHeadings, ...norm(extraStatement)],
+    creditHeadings: [...DEFAULT_RULES.creditHeadings, ...norm(extraCredit)],
   };
 }
 
@@ -85,36 +97,37 @@ function endsWithHeading(line: string, phrases: string[]): boolean {
   return false;
 }
 
+const KINDS = ['bill', 'statement', 'credit'] as const;
+
+function pickKind(found: Record<DocKind, boolean>): HeadingKind {
+  const hits = KINDS.filter((k) => found[k]);
+  if (hits.length > 1) return 'ambiguous';
+  return hits[0] ?? 'none';
+}
+
 /** Classifies a list of visual lines (first N lines of page 1). */
 export function classifyLines(lines: string[], rules: HeadingRules, window = 30): HeadingKind {
-  let bill = false;
-  let statement = false;
+  const found: Record<DocKind, boolean> = { bill: false, statement: false, credit: false };
   for (const [idx, raw] of lines.slice(0, window).entries()) {
     const line = normLine(raw);
     if (!line) continue;
-    if (matchesAny(line, rules.billHeadings)) bill = true;
-    if (matchesAny(line, rules.statementHeadings)) statement = true;
-    if (idx < 12) {
-      if (!bill && endsWithHeading(line, rules.billHeadings)) bill = true;
-      if (!statement && endsWithHeading(line, rules.statementHeadings)) statement = true;
+    for (const k of KINDS) {
+      if (matchesAny(line, phrasesOf(k, rules))) found[k] = true;
+      if (idx < 12 && !found[k] && endsWithHeading(line, phrasesOf(k, rules))) found[k] = true;
     }
   }
-  if (bill && statement) return 'ambiguous';
-  if (bill) return 'bill';
-  if (statement) return 'statement';
-  return 'none';
+  return pickKind(found);
 }
 
 /** Classifies the single heading string Claude reports. */
 export function classifyHeadingString(heading: string, rules: HeadingRules): HeadingKind {
   const line = normLine(heading);
   if (!line) return 'none';
-  const bill = matchesAny(line, rules.billHeadings);
-  const statement = matchesAny(line, rules.statementHeadings);
-  if (bill && statement) return 'ambiguous';
-  if (bill) return 'bill';
-  if (statement) return 'statement';
-  return 'none';
+  return pickKind({
+    bill: matchesAny(line, rules.billHeadings),
+    statement: matchesAny(line, rules.statementHeadings),
+    credit: matchesAny(line, rules.creditHeadings),
+  });
 }
 
 /**
@@ -129,10 +142,11 @@ function looseKind(heading: string, rules: HeadingRules): HeadingKind {
     const p = phrase.split(' ');
     return tokens.length >= p.length && p.every((w, i) => tokens[i] === w);
   };
-  const bill = rules.billHeadings.some(starts);
-  const statement = rules.statementHeadings.some(starts);
-  if (bill && statement) return 'ambiguous';
-  return bill ? 'bill' : statement ? 'statement' : 'none';
+  return pickKind({
+    bill: rules.billHeadings.some(starts),
+    statement: rules.statementHeadings.some(starts),
+    credit: rules.creditHeadings.some(starts),
+  });
 }
 
 function phraseAnywhere(text: string, phrases: string[]): boolean {
@@ -162,18 +176,18 @@ export function decideType(text: PdfText | null, claude: Extraction, rules: Head
   const textKind: HeadingKind | null = text && text.hasText ? classifyLines([...text.page1Lines, ...(text.page1Segments ?? [])], rules) : null;
 
   // The text layer shows a real heading, and Claude's heading text starts with the same words ("Tax Invoice No").
-  if (claudeKind === 'none' && (textKind === 'bill' || textKind === 'statement')) {
-    if (looseKind(claude.document_heading, rules) === textKind && claude.document_type === textKind && claude.confidence !== 'low') {
+  if (claudeKind === 'none' && isDocKind(textKind)) {
+    if (looseKind(claude.document_heading, rules) === textKind && claude.document_type === docTypeOf(textKind) && claude.confidence !== 'low') {
       return { kind: textKind, basis: 'heading confirmed by text layer; Claude read the same words with a label attached' };
     }
   }
 
   // Claude's heading holds a recognised phrase inside a longer title ("Tax Invoice / Receipt",
   // "Original Tax Invoice (Customer Copy)") and the PDF's own text shows the same phrase near the top.
-  if (claudeKind === 'none' && (claude.document_type === 'bill' || claude.document_type === 'statement') && claude.confidence !== 'low' && text && text.hasText) {
-    const kind = claude.document_type;
-    const other = kind === 'bill' ? rules.statementHeadings : rules.billHeadings;
-    const mine = kind === 'bill' ? rules.billHeadings : rules.statementHeadings;
+  if (claudeKind === 'none' && (claude.document_type === 'bill' || claude.document_type === 'statement' || claude.document_type === 'credit_note') && claude.confidence !== 'low' && text && text.hasText) {
+    const kind: DocKind = claude.document_type === 'credit_note' ? 'credit' : claude.document_type;
+    const other = phrasesNotOf(kind, rules);
+    const mine = phrasesOf(kind, rules);
     const top = [...text.page1Lines.slice(0, 12), ...(text.page1Segments ?? [])].join('\n');
     if (
       phraseAnywhere(claude.document_heading, mine) &&
@@ -197,14 +211,14 @@ export function decideType(text: PdfText | null, claude: Extraction, rules: Head
   }
 
   if (claudeKind === 'ambiguous' || textKind === 'ambiguous') {
-    return { kind: 'review', reasons: ['The heading matches both a bill and a statement, so the type is ambiguous.'] };
+    return { kind: 'review', reasons: ['The heading matches more than one document type (bill, credit note, statement), so the type is ambiguous.'] };
   }
 
-  const claudeIsDoc = claudeKind === 'bill' || claudeKind === 'statement';
+  const claudeIsDoc = isDocKind(claudeKind);
 
   // Agreement between the two readers.
   if (claudeIsDoc && textKind === claudeKind) {
-    if (claude.document_type !== claudeKind) {
+    if (claude.document_type !== docTypeOf(claudeKind)) {
       return {
         kind: 'review',
         reasons: [`Heading says ${claudeKind} but Claude classed the document as "${claude.document_type}".`],
@@ -214,13 +228,13 @@ export function decideType(text: PdfText | null, claude: Extraction, rules: Head
   }
 
   // Conflict.
-  if (claudeIsDoc && (textKind === 'bill' || textKind === 'statement') && textKind !== claudeKind) {
+  if (claudeIsDoc && isDocKind(textKind) && textKind !== claudeKind) {
     return {
       kind: 'review',
       reasons: [`Text layer heading says ${textKind} but Claude read a ${claudeKind} heading.`],
     };
   }
-  if (!claudeIsDoc && (textKind === 'bill' || textKind === 'statement')) {
+  if (!claudeIsDoc && isDocKind(textKind)) {
     return {
       kind: 'review',
       reasons: [`Text layer heading says ${textKind} but Claude did not read a matching heading ("${claude.document_heading}").`],
@@ -229,17 +243,17 @@ export function decideType(text: PdfText | null, claude: Extraction, rules: Head
 
   // Claude read a heading the text layer did not show.
   if (claudeIsDoc) {
-    const phrases = claudeKind === 'bill' ? rules.billHeadings : rules.statementHeadings;
+    const phrases = phrasesOf(claudeKind, rules);
     if (textKind === null) {
       // Scanned or image-only PDF: only Claude can read it, so demand at least medium confidence.
       // Scanned bills are always flagged for a closer check downstream.
-      if (claude.confidence !== 'low' && claude.document_type === claudeKind) {
+      if (claude.confidence !== 'low' && claude.document_type === docTypeOf(claudeKind)) {
         return { kind: claudeKind, basis: `scanned PDF, heading read by Claude with ${claude.confidence} confidence` };
       }
       return { kind: 'review', reasons: ['Scanned PDF and Claude was not confident enough about the document type.'] };
     }
     // Text layer exists but the heading line was not detected in the top lines.
-    if (claude.confidence === 'high' && claude.document_type === claudeKind && text && phraseAnywhere(text.page1Text, phrases)) {
+    if (claude.confidence === 'high' && claude.document_type === docTypeOf(claudeKind) && text && phraseAnywhere(text.page1Text, phrases)) {
       return { kind: claudeKind, basis: 'heading found in page text outside the top lines, confirmed by Claude' };
     }
     // A statement title drawn as a picture or outlines never reaches the text layer. Filing a statement only saves

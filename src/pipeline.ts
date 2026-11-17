@@ -4,7 +4,7 @@ import { XeroAuthError, XeroConfigError, XeroError, type XeroPort } from './xero
 import { decideType, type HeadingRules } from './classify.js';
 import { readPdfText, type PdfText } from './pdftext.js';
 import { compareBillPasses, compareStatementPasses, validateBill, validateStatement } from './validate.js';
-import { billFileName, statementFileName, withSuffix } from './naming.js';
+import { billFileName, creditFileName, statementFileName, withSuffix } from './naming.js';
 import { buildDraftLines, expectedXeroTotals } from './billmap.js';
 import { errMsg, type Logger } from './logger.js';
 import { moneyFmt, near, properName, sha256, todayIso } from './util.js';
@@ -93,6 +93,7 @@ export interface MessageOutcome {
 }
 
 const XERO_LINK = (id: string) => `https://go.xero.com/AccountsPayable/Edit.aspx?InvoiceID=${id}`;
+const XERO_CREDIT_LINK = (id: string) => `https://go.xero.com/AccountsPayable/ViewCreditNote.aspx?creditNoteID=${id}`;
 
 export class Pipeline {
   private bySender = new Map<string, ClientConfig>();
@@ -210,8 +211,18 @@ export class Pipeline {
   // Drop folder: a PDF saved by hand into the client's drop folder
   // -------------------------------------------------------------------------
 
+  /**
+   * Drop folders belong to the separate folder service. This (email) service only watches them if WATCH_DROP_FOLDERS=true,
+   * so a CLIENTS_JSON pasted into the wrong service can never make two services fight over the same folder.
+   */
   dropClients(): ClientConfig[] {
+    if (process.env.WATCH_DROP_FOLDERS !== 'true') return [];
     return this.d.cfg.clients.filter((c) => c.sharepoint.dropFolder);
+  }
+
+  /** Clients that have a drop folder in the config, whether or not this service watches them. */
+  configuredDropFolders(): string[] {
+    return this.d.cfg.clients.filter((c) => c.sharepoint.dropFolder).map((c) => c.name);
   }
 
   /** Looks at the drop folder once and handles every PDF in it. Files are only ever moved after everything for them succeeded. */
@@ -334,15 +345,15 @@ export class Pipeline {
     if (decision.kind === 'review') return { kind: 'review', reasons: decision.reasons.map((r) => `"${att.name}": ${r}`) };
 
     const kind: DocKind = decision.kind;
-    if (kind === 'bill' && first.invoice_count > 1) {
+    if (kind !== 'statement' && first.invoice_count > 1) {
       return { kind: 'review', reasons: [`"${att.name}": this PDF appears to contain ${first.invoice_count} separate invoices. It was not filed automatically, so each bill can be handled on its own.`] };
     }
     const passes: Extraction[] = [first];
     for (let i = 1; i < cfg.passes; i++) passes.push(await extractor.extract(buf));
     for (const p of passes.slice(1)) {
       const diffs = [
-        ...(p.document_type !== kind ? [`document type (${kind} vs ${p.document_type})`] : []),
-        ...(kind === 'bill' ? compareBillPasses(first, p) : compareStatementPasses(first, p)),
+        ...(p.document_type !== (kind === 'credit' ? 'credit_note' : kind) ? [`document type (${kind} vs ${p.document_type})`] : []),
+        ...(kind === 'statement' ? compareStatementPasses(first, p) : compareBillPasses(first, p)),
       ];
       if (diffs.length > 0) {
         return { kind: 'review', reasons: [`"${att.name}": two independent readings of the PDF disagree on ${diffs.join(', ')}.`] };
@@ -372,18 +383,25 @@ export class Pipeline {
       };
     }
 
-    // ------------------------------- bills --------------------------------
-    const v = validateBill(first, ctx);
+    // -------------------- bills and supplier credit notes -----------------
+    const isCredit = kind === 'credit';
+    const docWord = isCredit ? 'credit note' : 'bill';
+    const docLabel = isCredit ? 'Supplier credit note' : 'Supplier bill';
+    const sign = isCredit ? -1 : 1; // the Bills List shows a credit note as a negative amount
+    const xeroLink = (id: string) => (isCredit ? XERO_CREDIT_LINK(id) : XERO_LINK(id));
+    const v = validateBill(first, ctx, { credit: isCredit });
     if (v.issues.length > 0 || !v.resolved || !first.bill) {
-      return { kind: 'review', reasons: v.issues.map((i) => `"${att.name}": ${i}`), ledger: { docType: 'Bill', supplier, number: first.bill?.bill_number ?? '' } };
+      return { kind: 'review', reasons: v.issues.map((i) => `"${att.name}": ${i}`), ledger: { docType: isCredit ? 'Credit note' : 'Bill', supplier, number: first.bill?.bill_number ?? '' } };
     }
     const bill = first.bill;
     const resolved = v.resolved;
     const billNumber = bill.bill_number!.trim();
-    const fileName = billFileName(resolved.issueDate, supplier, billNumber);
+    const fileName = isCredit ? creditFileName(resolved.issueDate, supplier, billNumber) : billFileName(resolved.issueDate, supplier, billNumber);
+    // In the Bills List a credit note is told apart from an invoice with the same number.
+    const listNumber = isCredit ? `Credit Note ${billNumber}` : billNumber;
 
     const loc = await this.resolveFolder(client, 'bill', resolved.issueDate, target.drive);
-    if (!loc.ok) return { kind: 'review', reasons: [`"${att.name}": ${loc.reason}`], ledger: { docType: 'Supplier bill', supplier, number: billNumber, docDate: resolved.issueDate } };
+    if (!loc.ok) return { kind: 'review', reasons: [`"${att.name}": ${loc.reason}`], ledger: { docType: docLabel, supplier, number: billNumber, docDate: resolved.issueDate } };
     const list = await this.checkBillsList(client, target.drive, loc.base);
 
     if (cfg.dryRun) {
@@ -394,23 +412,23 @@ export class Pipeline {
       if (blocked) return blocked;
       return {
         kind: 'planned',
-        doc: 'bill',
+        doc: kind,
         fileName,
-        note: `Draft bill ${billNumber} for ${supplier}, issued ${resolved.issueDate}, due ${resolved.dueDate ?? 'not stated'}, GST ${moneyFmt(resolved.totalGst)}, total ${moneyFmt(resolved.totalIncGst)}, ${bill.lines.length} line(s), into ${loc.folder}${list ? `, one row added to ${list.filePath.split('/').pop()}` : ''}.`,
+        note: `Draft ${docWord} ${billNumber} for ${supplier}, issued ${resolved.issueDate}, due ${resolved.dueDate ?? 'not stated'}, GST ${moneyFmt(resolved.totalGst)}, total ${moneyFmt(resolved.totalIncGst)}, ${bill.lines.length} line(s), into ${loc.folder}${list ? `, one row added to ${list.filePath.split('/').pop()}` : ''}.`,
       };
     }
 
     // Save to SharePoint first, so the source document is safe whatever happens in Xero.
     const saved = await this.saveUnique(target.drive, loc.folder, fileName, buf, hash);
-    const ledgerBase = { docType: 'Supplier bill', supplier, number: billNumber, docDate: resolved.issueDate, total: moneyFmt(resolved.totalIncGst), file: saved.fileName };
+    const ledgerBase = { docType: docLabel, supplier, number: billNumber, docDate: resolved.issueDate, total: moneyFmt(resolved.totalIncGst), file: saved.fileName };
 
     const touchKey = `${msg.id}|${hash}`;
     const mine = this.touched.has(touchKey);
-    const billDesc = `${supplier} bill ${billNumber} (${resolved.issueDate}, total ${moneyFmt(resolved.totalIncGst)})`;
+    const billDesc = `${supplier} ${docWord} ${billNumber} (${resolved.issueDate}, total ${moneyFmt(resolved.totalIncGst)})`;
     const duplicate = (where: string, xeroLink = ''): ItemResult => ({
       kind: 'review',
       reasons: [
-        `"${att.name}": DUPLICATE BILL. ${billDesc} has already been processed: ${where}.${saved.status === 'created_with_suffix' ? ` This email carries a different PDF of it, saved only as "${saved.fileName}".` : ''} Nothing new was added (no Bills List row, no Xero draft). The email was left in the inbox. If it is not really a duplicate, remove the BK Review category to try again.`,
+        `"${att.name}": DUPLICATE ${docWord.toUpperCase()}. ${billDesc} has already been processed: ${where}.${saved.status === 'created_with_suffix' ? ` This email carries a different PDF of it, saved only as "${saved.fileName}".` : ''} Nothing new was added (no Bills List row, no Xero draft). The email was left in the inbox. If it is not really a duplicate, remove the BK Review category to try again.`,
       ],
       ledger: { ...ledgerBase, ...(xeroLink ? { xeroLink } : {}) },
     });
@@ -418,17 +436,17 @@ export class Pipeline {
     // The Bills List row is written last, so a row means this bill went all the way through before.
     const rowData = (extraNote = '') => ({
       supplier,
-      billNumber,
+      billNumber: listNumber,
       issueDate: resolved.issueDate,
-      dueDate: resolved.dueDate,
-      exGst: resolved.subtotalExGst,
-      gst: resolved.totalGst,
-      total: resolved.totalIncGst,
+      dueDate: isCredit ? null : resolved.dueDate,
+      exGst: sign * resolved.subtotalExGst,
+      gst: sign * resolved.totalGst,
+      total: sign * resolved.totalIncGst,
       fileName: saved.fileName,
-      notes: [scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
+      notes: [isCredit ? 'Credit note (draft in Xero, not yet applied to a bill)' : '', scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
     });
     if (!mine) {
-      if (saved.status === 'created_with_suffix') return duplicate(`the same bill is already filed in SharePoint under another PDF`);
+      if (saved.status === 'created_with_suffix') return duplicate(`the same ${docWord} is already filed in SharePoint under another PDF`);
       if (list && (await this.billsList.has(target.drive, list, rowData()))) return duplicate('it is already in the Bills List');
     }
 
@@ -444,6 +462,7 @@ export class Pipeline {
     return this.guardXero(async () => {
       await this.d.xero.ensureOrgReady(client);
       const tenant = client.xero.tenantId;
+      const xdoc = isCredit ? ('credit' as const) : ('invoice' as const);
 
       const resolved0 = await this.d.xero.resolveContact(tenant, supplier, first.supplier_abn, {
         fuzzyPolicy: cfg.contactFuzzyPolicy,
@@ -466,33 +485,33 @@ export class Pipeline {
       if (!contact.ok) throw new Error('unreachable');
       const unconfirmedNote = unconfirmed ? `Xero supplier not confirmed: draft is under "${UNCONFIRMED_CONTACT}" (${unconfirmed})` : '';
 
-      const existing = await this.d.xero.findBill(tenant, contact.contact.contactId, billNumber, reference);
+      const existing = await (isCredit ? this.d.xero.findCreditNote(tenant, contact.contact.contactId, billNumber, reference) : this.d.xero.findBill(tenant, contact.contact.contactId, billNumber, reference));
       if (!mine) {
         // A completed earlier run attached the PDF. A draft without it is an interrupted run that is safe to finish.
-        if (existing && (await this.d.xero.hasAttachment(tenant, existing.invoiceId, saved.fileName))) {
-          return duplicate(`Xero already has it for ${contact.contact.name} (${existing.status})`, XERO_LINK(existing.invoiceId));
+        if (existing && (await this.d.xero.hasAttachment(tenant, existing.invoiceId, saved.fileName, xdoc))) {
+          return duplicate(`Xero already has it for ${contact.contact.name} (${existing.status})`, xeroLink(existing.invoiceId));
         }
         // The same number with the same total under any other supplier (entered by hand, or under the placeholder).
-        const others = (await this.d.xero.findBillsByNumber(tenant, billNumber)).filter((x) => x.invoiceId !== existing?.invoiceId && near(x.total, resolved.totalIncGst, 0.02));
+        const others = (await (isCredit ? this.d.xero.findCreditNotesByNumber(tenant, billNumber) : this.d.xero.findBillsByNumber(tenant, billNumber))).filter((x) => x.invoiceId !== existing?.invoiceId && near(x.total, resolved.totalIncGst, 0.02));
         if (others.length > 0) {
-          return duplicate(`Xero already has bill ${billNumber} for the same total (${others.length > 1 ? `${others.length} bills, first status ${others[0]!.status}` : others[0]!.status})`, XERO_LINK(others[0]!.invoiceId));
+          return duplicate(`Xero already has ${docWord} ${billNumber} for the same total (${others.length > 1 ? `${others.length} items, first status ${others[0]!.status}` : others[0]!.status})`, xeroLink(others[0]!.invoiceId));
         }
         if (existing && existing.status !== 'DRAFT') {
-          return duplicate(`Xero already has it for ${contact.contact.name} (${existing.status})`, XERO_LINK(existing.invoiceId));
+          return duplicate(`Xero already has it for ${contact.contact.name} (${existing.status})`, xeroLink(existing.invoiceId));
         }
       }
       if (existing) {
         this.touched.add(touchKey);
-        if (!(await this.d.xero.hasAttachment(tenant, existing.invoiceId, saved.fileName))) {
-          await this.d.xero.uploadAttachment(tenant, existing.invoiceId, saved.fileName, buf);
+        if (!(await this.d.xero.hasAttachment(tenant, existing.invoiceId, saved.fileName, xdoc))) {
+          await this.d.xero.uploadAttachment(tenant, existing.invoiceId, saved.fileName, buf, xdoc);
         }
         await addListRow(unconfirmed ? 'Xero supplier to be confirmed' : '');
         return {
           kind: 'saved',
-          doc: 'bill',
+          doc: kind,
           fileName: saved.fileName,
-          note: `bill already in Xero as ${existing.status}`,
-          ledger: { ...ledgerBase, xeroLink: XERO_LINK(existing.invoiceId), notes: `Finished an interrupted earlier run; Xero already had the draft (${existing.status})` },
+          note: `${docWord} already in Xero as ${existing.status}`,
+          ledger: { ...ledgerBase, xeroLink: xeroLink(existing.invoiceId), notes: `Finished an interrupted earlier run; Xero already had the draft (${existing.status})` },
         };
       }
 
@@ -501,7 +520,8 @@ export class Pipeline {
       const expected = expectedXeroTotals(lines, resolved.amountsIncludeGst);
       const idKey = sha256(Buffer.from(`${client.key}|${msg.id}|${hash}|${ctx.today}`));
 
-      const created = await this.d.xero.createDraftBill(
+      const create = (isCredit ? this.d.xero.createDraftCreditNote : this.d.xero.createDraftBill).bind(this.d.xero);
+      const created = await create(
         tenant,
         {
           contactId: contact.contact.contactId,
@@ -518,9 +538,9 @@ export class Pipeline {
         idKey,
       );
       this.touched.add(touchKey);
-      await this.d.xero.uploadAttachment(tenant, created.invoiceId, saved.fileName, buf);
+      await this.d.xero.uploadAttachment(tenant, created.invoiceId, saved.fileName, buf, xdoc);
 
-      const link = XERO_LINK(created.invoiceId);
+      const link = xeroLink(created.invoiceId);
       // Confirm what Xero holds equals what the PDF says.
       if (!near(created.total, resolved.totalIncGst, 0.02) || !near(created.totalTax, resolved.totalGst, 0.02)) {
         return {
@@ -534,7 +554,7 @@ export class Pipeline {
       await addListRow(unconfirmed ? 'Xero supplier to be confirmed' : '');
       return {
         kind: 'saved',
-        doc: 'bill',
+        doc: kind,
         fileName: saved.fileName,
         note: unconfirmed ? unconfirmedNote : contact.created ? `new Xero contact "${contact.contact.name}" created` : undefined,
         ledger: { ...ledgerBase, xeroLink: link, notes: unconfirmed ? unconfirmedNote : contact.created ? `New Xero contact created: ${contact.contact.name}` : '' },
@@ -579,7 +599,7 @@ export class Pipeline {
     drive: DriveRef,
   ): Promise<{ ok: true; base: string; folder: string } | { ok: false; reason: string }> {
     const sp = client.sharepoint;
-    const base = expandFolder(kind === 'bill' ? sp.billsFolder : sp.statementsFolder, dateIso);
+    const base = expandFolder(kind === 'statement' ? sp.statementsFolder : sp.billsFolder, dateIso);
     if (!(await this.d.graph.folderExists(drive, base))) {
       return { ok: false, reason: `The folder "${base}" does not exist (financial year ${financialYear(dateIso)} for ${dateIso}). Create it, then remove the "BK Review" category to retry.` };
     }

@@ -11,6 +11,14 @@ export function billFileName(issueDateIso: string, supplierName: string, billNum
   return `${d} ${m} ${y} - ${supplier} - ${number}.pdf`;
 }
 
+/** Supplier credit notes: <Date DD MM YYYY> - <Supplier Name> - Credit Note <Number>.pdf */
+export function creditFileName(issueDateIso: string, supplierName: string, creditNumber: string): string {
+  const supplier = sanitiseFilePart(supplierName, 80) || 'Unknown Supplier';
+  const number = sanitiseFilePart(creditNumber, 40) || 'No Number';
+  const [y, m, d] = issueDateIso.split('-');
+  return `${d} ${m} ${y} - ${supplier} - Credit Note ${number}.pdf`;
+}
+
 export function statementFileName(supplierName: string, asAtIso: string): string {
   const supplier = sanitiseFilePart(supplierName, 100) || 'Unknown Supplier';
   return `${supplier} - ${formatDateParts(asAtIso)}.pdf`;

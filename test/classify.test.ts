@@ -17,7 +17,7 @@ test('headings in the brief are recognised', () => {
 });
 
 test('labels and unrelated headings are not headings', () => {
-  for (const h of ['Bill To', 'Bill Date', 'Bill Number', 'Statement Date', 'Invoice', 'Purchase Order', 'Remittance Advice', 'Credit Note', 'Tax Invoice Total', '']) {
+  for (const h of ['Bill To', 'Bill Date', 'Bill Number', 'Statement Date', 'Invoice', 'Purchase Order', 'Remittance Advice', 'Credit Note To', 'Tax Invoice Total', '']) {
     assert.equal(classifyHeadingString(h, R), 'none', h);
   }
 });
@@ -124,4 +124,15 @@ test('a statement whose title is not in the text layer is accepted when the page
   assert.equal(decideType(t, lowConf, R).kind, 'review');
   const notLedger = txt(['Hopper Joint', 'Thank you for your business']);
   assert.equal(decideType(notLedger, claude, R).kind, 'review');
+});
+
+test('credit note headings are recognised and kept apart from bills and statements', () => {
+  assert.equal(classifyLines(['Acme Foods', 'TAX CREDIT NOTE', 'Credit Note No CN-77'], DEFAULT_RULES), 'credit');
+  assert.equal(classifyLines(['Acme Foods', 'Credit Note 9'], DEFAULT_RULES), 'credit');
+  assert.equal(classifyLines(['Acme Foods', 'Adjustment Note'], DEFAULT_RULES), 'credit');
+  assert.equal(classifyHeadingString('Tax Credit Note', DEFAULT_RULES), 'credit');
+  // "Tax Invoice" printed on the same page as a credit note heading is ambiguous: a person decides
+  assert.equal(classifyLines(['TAX INVOICE', 'Credit Note 5'], DEFAULT_RULES), 'ambiguous');
+  // a line that only mentions a credit note is not a heading
+  assert.equal(classifyLines(['Please apply the credit note to your next invoice'], DEFAULT_RULES), 'none');
 });

@@ -35,7 +35,7 @@ async function main() {
   let taxTypes = { withGst: 'INPUT', noGst: 'EXEMPTEXPENSES' };
   try {
     const cf = loadClientsFile();
-    rules = buildRules(cf.rules.extraBillHeadings, cf.rules.extraStatementHeadings);
+    rules = buildRules(cf.rules.extraBillHeadings, cf.rules.extraStatementHeadings, cf.rules.extraCreditHeadings);
     allowedCurrencies = cf.allowedCurrencies.map((c) => c.toUpperCase());
     const c0 = cf.clients[0];
     if (c0) taxTypes = { withGst: c0.xero.taxTypeWithGst, noGst: c0.xero.taxTypeNoGst };

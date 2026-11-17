@@ -111,3 +111,10 @@ test('a bill that arrives without its totals is flagged, never given null totals
   explicitNull.bill.total_gst = null;
   assert.equal(billMissingTotals(normaliseToolInput(explicitNull)), false);
 });
+
+test('the order-date rule is added to the instructions only for the suppliers named in the config', async () => {
+  const { buildSystemPrompt } = await import('../src/extract.js');
+  assert.ok(!buildSystemPrompt([]).includes('ORDER DATE'));
+  const p = buildSystemPrompt(['Natoora']);
+  assert.ok(p.includes('"Natoora"') && p.includes('ORDER DATE') && p.includes('every other supplier'));
+});

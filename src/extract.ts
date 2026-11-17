@@ -144,13 +144,13 @@ export const TOOL_SCHEMA = {
     document_heading: {
       type: 'string',
       description:
-        'The exact words of the main title printed near the top of page 1 that says what kind of document this is (for example "TAX INVOICE", "Statement", "Supplier Bill", "Purchase Order", "Remittance Advice"). Copy it verbatim. Empty string if there is no such title.',
+        'The exact words of the main title printed near the top of page 1 that says what kind of document this is (for example "TAX INVOICE", "Statement", "Supplier Bill", "Tax Credit Note", "Purchase Order", "Remittance Advice"). Copy it verbatim. Empty string if there is no such title.',
     },
     document_type: {
       type: 'string',
-      enum: ['bill', 'statement', 'other'],
+      enum: ['bill', 'statement', 'credit_note', 'other'],
       description:
-        'bill = a supplier tax invoice or bill asking the customer to pay for goods or services. statement = a statement of account listing a supplier\'s transactions and balance. other = anything else (credit note, remittance advice, purchase order, quote, receipt, delivery docket, marketing, contract, photo, etc).',
+        'bill = a supplier tax invoice or bill asking the customer to pay for goods or services. statement = a statement of account listing a supplier\'s transactions and balance. credit_note = a supplier credit note (tax credit note, adjustment note) reducing what the customer owes; fill the bill object for it. other = anything else (remittance advice, purchase order, quote, receipt, delivery docket, marketing, contract, photo, etc).',
     },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     invoice_count: {
@@ -166,7 +166,7 @@ export const TOOL_SCHEMA = {
     customer_name: { ...nullableString, description: 'The business the document is addressed or billed to. Null if not shown.' },
     bill: {
       type: ['object', 'null'],
-      description: 'Fill only when document_type is bill, otherwise null.',
+      description: 'Fill when document_type is bill or credit_note, otherwise null. For a credit note, bill_number is the CREDIT NOTE number and every amount is a positive number (drop any minus sign or brackets).',
       additionalProperties: false,
       required: [
         'bill_number', 'issue_date_printed', 'issue_date_iso', 'due_date_printed', 'due_date_iso', 'due_on_receipt',
@@ -234,19 +234,34 @@ Rules:
 - Amounts are plain numbers in dollars with no symbols or thousands separators.
 - Australian GST is 10%. Mark each line gst_applicable from what the document shows (GST column, markers, notes) and make sure total_gst is the GST printed on the document.
 - The supplier is the business being paid, the customer is the business billed. Do not mix them up.
-- If the PDF is not a supplier bill or a statement, set document_type to other and leave bill and statement null.
+- If the PDF is not a supplier bill, a supplier credit note or a statement, set document_type to other and leave bill and statement null. A credit note is recorded in the bill object like a bill: bill_number is the credit note number, the date is the credit note date, and all amounts are positive numbers even when printed with a minus sign or brackets.
 - Pass bill and statement as real JSON objects, never as text. Include every field of the bill, including subtotal_ex_gst, total_gst and total_inc_gst. On multi-page invoices the totals are usually in a box at the bottom of the last page, so read every page.`;
+
+/**
+ * Some suppliers (Natoora) print an order date and a delivery date but no invoice date. For the suppliers named in the
+ * client config, the ORDER DATE is the issue date. Any other supplier without an invoice date still goes to review.
+ */
+export function buildSystemPrompt(orderDateSuppliers: string[]): string {
+  const names = orderDateSuppliers.map((n) => n.trim()).filter(Boolean);
+  if (names.length === 0) return SYSTEM_PROMPT;
+  return `${SYSTEM_PROMPT}
+- Exception for these suppliers only (their invoices print no invoice date): if the supplier name contains ${names.map((n) => `"${n}"`).join(' or ')}, use the ORDER DATE as the issue date. Copy it exactly as printed into issue_date_printed and give it as YYYY-MM-DD in issue_date_iso. Do not use the delivery date. For every other supplier, never use an order or delivery date as the issue date; if there is no invoice date, use null.`;
+}
 
 export class ExtractionError extends Error {}
 
 export class ClaudeExtractor implements Extractor {
   private readonly client: Anthropic;
 
+  private readonly systemPrompt: string;
+
   constructor(
     apiKey: string,
     private readonly model: string,
+    orderDateSuppliers: string[] = [],
   ) {
     this.client = new Anthropic({ apiKey, maxRetries: 3, timeout: 120_000 });
+    this.systemPrompt = buildSystemPrompt(orderDateSuppliers);
   }
 
   /** Cheapest possible call: proves the key works and the model name is valid. */
@@ -272,7 +287,7 @@ export class ClaudeExtractor implements Extractor {
     const res = await this.client.messages.create({
       model: this.model,
       max_tokens: 1000,
-      system: SYSTEM_PROMPT,
+      system: this.systemPrompt,
       tools: [{ name: TOTALS_TOOL.name, description: TOTALS_TOOL.description, input_schema: TOTALS_TOOL.input_schema as unknown as Anthropic.Tool.InputSchema }],
       tool_choice: { type: 'auto' },
       messages: [
@@ -298,7 +313,7 @@ export class ClaudeExtractor implements Extractor {
     const res = await this.client.messages.create({
       model: this.model,
       max_tokens: 16000,
-      system: SYSTEM_PROMPT,
+      system: this.systemPrompt,
       tools: [
         {
           name: TOOL_NAME,

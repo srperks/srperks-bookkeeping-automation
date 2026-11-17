@@ -47,8 +47,8 @@ async function main(): Promise<void> {
     },
     graph,
     xero,
-    extractor: new ClaudeExtractor(cfg.extraction.anthropicApiKey, cfg.extraction.model),
-    rules: buildRules(f.rules.extraBillHeadings, f.rules.extraStatementHeadings),
+    extractor: new ClaudeExtractor(cfg.extraction.anthropicApiKey, cfg.extraction.model, f.rules.orderDateSuppliers),
+    rules: buildRules(f.rules.extraBillHeadings, f.rules.extraStatementHeadings, f.rules.extraCreditHeadings),
     log,
     alerter,
     ledger: f.log ? new ExcelLedger(graph, f.log) : nullLedger,
@@ -63,6 +63,9 @@ async function main(): Promise<void> {
     passes: cfg.extraction.passes,
   });
   if (cfg.dryRun) log.warn('DRY_RUN is on: nothing will be saved, drafted, moved or tagged.');
+  if (pipeline.configuredDropFolders().length > 0 && pipeline.dropClients().length === 0) {
+    log.warn(`Drop folders are in the config for ${pipeline.configuredDropFolders().join(', ')} but this service ignores them (WATCH_DROP_FOLDERS is not "true"). The separate folder service handles them.`);
+  }
   if (cfg.xero.setupKey) log.warn('Xero setup page is ENABLED at /xero/connect. Delete XERO_SETUP_KEY once Xero is authorised.');
 
   // ----- health endpoint -----
