@@ -113,6 +113,13 @@ export function normaliseBusinessName(name: string): string {
   return tokens.join(' ');
 }
 
+/** Same business, ignoring case, punctuation, legal suffixes and word breaks ("Boomtown" = "BOOM TOWN"). */
+export function sameBusinessName(a: string, b: string): boolean {
+  const na = normaliseBusinessName(a);
+  const nb = normaliseBusinessName(b);
+  return na === nb || na.replace(/ /g, '') === nb.replace(/ /g, '');
+}
+
 /** Token overlap used to spot "close but not equal" supplier names. */
 export function nameSimilarity(a: string, b: string): number {
   const ta = new Set(normaliseBusinessName(a).split(' ').filter(Boolean));

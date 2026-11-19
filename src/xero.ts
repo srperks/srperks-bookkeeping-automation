@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from 'node:path';
 import type { ClientConfig } from './types.js';
 import type { DraftBillInput } from './billmap.js';
-import { nameSimilarity, normaliseBusinessName, normaliseDocNumber, sleep } from './util.js';
+import { nameSimilarity, normaliseBusinessName, normaliseDocNumber, sameBusinessName, sleep } from './util.js';
 import type { Logger } from './logger.js';
 
 const API = 'https://api.xero.com/api.xro/2.0';
@@ -305,7 +305,7 @@ export class XeroClient implements XeroPort {
     const norm = normaliseBusinessName(name);
     const abnDigits = digits(abn);
 
-    const exact = contacts.filter((c) => normaliseBusinessName(c.name) === norm);
+    const exact = contacts.filter((c) => sameBusinessName(c.name, name));
     if (exact.length === 1) {
       const c = exact[0]!;
       const cAbn = digits(c.taxNumber);

@@ -8,6 +8,7 @@ import {
   normaliseDocNumber,
   parsePrintedDate,
   round2,
+  sameBusinessName,
 } from './util.js';
 
 export interface ValidateContext {
@@ -182,9 +183,7 @@ function sortedAmounts(b: BillData): string {
 
 export function compareBillPasses(a: Extraction, b: Extraction): string[] {
   const diffs: string[] = [];
-  const sa = normaliseBusinessName(a.supplier_name ?? '');
-  const sb = normaliseBusinessName(b.supplier_name ?? '');
-  if (sa !== sb) diffs.push(`supplier name ("${a.supplier_name}" vs "${b.supplier_name}")`);
+  if (!sameBusinessName(a.supplier_name ?? '', b.supplier_name ?? '')) diffs.push(`supplier name ("${a.supplier_name}" vs "${b.supplier_name}")`);
 
   const ba = a.bill;
   const bb = b.bill;
@@ -206,7 +205,7 @@ export function compareBillPasses(a: Extraction, b: Extraction): string[] {
 
 export function compareStatementPasses(a: Extraction, b: Extraction): string[] {
   const diffs: string[] = [];
-  if (normaliseBusinessName(a.supplier_name ?? '') !== normaliseBusinessName(b.supplier_name ?? '')) {
+  if (!sameBusinessName(a.supplier_name ?? '', b.supplier_name ?? '')) {
     diffs.push(`supplier name ("${a.supplier_name}" vs "${b.supplier_name}")`);
   }
   const da = (a.statement as StatementData | null)?.statement_date_iso ?? null;

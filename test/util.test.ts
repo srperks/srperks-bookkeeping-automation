@@ -69,3 +69,10 @@ test('properName fixes mixed names with shouting or lowercase words', () => {
   assert.equal(properName('McDonald Bros PTY LTD'), 'McDonald Bros Pty Ltd');
   assert.equal(properName('Smith and Sons BP Pty Ltd'), 'Smith and Sons BP Pty Ltd');
 });
+
+test('sameBusinessName ignores case, punctuation and word breaks', async () => {
+  const { sameBusinessName } = await import('../src/util.js');
+  assert.equal(sameBusinessName('Boomtown Coffee Roasters', 'BOOM TOWN COFFEE ROASTERS'), true);
+  assert.equal(sameBusinessName('Acme Foods Pty Ltd', 'ACME FOODS'), true);
+  assert.equal(sameBusinessName('Acme Foods', 'Acme Drinks'), false);
+});
