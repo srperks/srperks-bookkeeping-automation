@@ -76,6 +76,9 @@ export class FakeGraph implements GraphPort {
   async listFiles(_d: DriveRef, folder: string): Promise<DriveItem[]> {
     return this.filesIn(folder).filter((n) => !n.includes('/')).map((n) => ({ id: `${folder}/${n}`, name: n, size: this.files.get(`${folder}/${n}`)!.length }));
   }
+  async deleteItem(_d: DriveRef, itemId: string) {
+    this.files.delete(itemId);
+  }
   async moveItem(_d: DriveRef, itemId: string, destFolder: string) {
     if (this.failMove) throw new GraphError('move failed', 503);
     const buf = this.files.get(itemId)!;

@@ -174,7 +174,7 @@ test('same bill forwarded twice: one draft, one file, second email flagged as a 
   assert.match(t.alerter.alerts[0]!.body, /DUPLICATE BILL/);
 });
 
-test('same bill number but a different PDF is flagged, kept as "(2)", and no second draft is made', async () => {
+test('same bill number but a different PDF is flagged DUPLICATE, no "(2)" copy is left in SharePoint, and no second draft is made', async () => {
   const t = setup();
   const pdf1 = await billPdf('INV-1042');
   const pdf2 = await makePdf([{ text: 'Acme Foods Pty Ltd', y: 60 }, { text: 'TAX INVOICE', y: 110, size: 22 }, { text: 'REVISED copy', y: 150 }]);
@@ -185,8 +185,9 @@ test('same bill number but a different PDF is flagged, kept as "(2)", and no sec
 
   assert.equal(out.status, 'review');
   assert.equal(t.xero.bills.length, 1);
-  assert.equal(t.graph.filesIn('Hopper/Bills').length, 2);
-  assert.ok(t.graph.filesIn('Hopper/Bills').some((f) => f.endsWith('(2).pdf')));
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 1);
+  assert.ok(!t.graph.filesIn('Hopper/Bills').some((f) => f.includes('(2)')));
+  assert.match(out.detail.join(' '), /DUPLICATE BILL/);
   assert.equal(t.graph.moved.has('b'), false);
 });
 

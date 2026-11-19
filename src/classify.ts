@@ -35,7 +35,7 @@ export function buildRules(extraBill: string[] = [], extraStatement: string[] = 
 }
 
 const PREFIX_WORDS = new Set(['original', 'copy', 'duplicate', 'reprint']);
-const FILLER = new Set(['no', 'number', 'num', 'nr', 'of', 'account', 'accounts', 'copy', 'original', 'duplicate']);
+const FILLER = new Set(['no', 'number', 'num', 'nr', 'of', 'account', 'accounts', 'copy', 'original', 'duplicate', 'activity']);
 const LABEL_ONLY = new Set(['no', 'number', 'num', 'nr']);
 
 export function normLine(s: string): string {
@@ -119,6 +119,19 @@ export function classifyLines(lines: string[], rules: HeadingRules, window = 30)
   return pickKind(found);
 }
 
+/**
+ * The page's visual lines and its column-gap segments are classified separately (each with its own window), because a
+ * busy page has more than 30 lines and the segments of the top rows would otherwise fall outside the window.
+ */
+export function classifyPage(text: PdfText, rules: HeadingRules): HeadingKind {
+  const a = classifyLines(text.page1Lines, rules);
+  const b = text.page1Segments && text.page1Segments.length > 0 ? classifyLines(text.page1Segments, rules) : 'none';
+  if (a === b) return a;
+  if (a === 'none') return b;
+  if (b === 'none') return a;
+  return 'ambiguous';
+}
+
 /** Classifies the single heading string Claude reports. */
 export function classifyHeadingString(heading: string, rules: HeadingRules): HeadingKind {
   const line = normLine(heading);
@@ -173,7 +186,7 @@ export type Decision =
  */
 export function decideType(text: PdfText | null, claude: Extraction, rules: HeadingRules): Decision {
   const claudeKind = classifyHeadingString(claude.document_heading, rules);
-  const textKind: HeadingKind | null = text && text.hasText ? classifyLines([...text.page1Lines, ...(text.page1Segments ?? [])], rules) : null;
+  const textKind: HeadingKind | null = text && text.hasText ? classifyPage(text, rules) : null;
 
   // The text layer shows a real heading, and Claude's heading text starts with the same words ("Tax Invoice No").
   if (claudeKind === 'none' && isDocKind(textKind)) {

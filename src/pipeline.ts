@@ -425,13 +425,26 @@ export class Pipeline {
     const touchKey = `${msg.id}|${hash}`;
     const mine = this.touched.has(touchKey);
     const billDesc = `${supplier} ${docWord} ${billNumber} (${resolved.issueDate}, total ${moneyFmt(resolved.totalIncGst)})`;
-    const duplicate = (where: string, xeroLink = ''): ItemResult => ({
-      kind: 'review',
-      reasons: [
-        `"${att.name}": DUPLICATE ${docWord.toUpperCase()}. ${billDesc} has already been processed: ${where}.${saved.status === 'created_with_suffix' ? ` This email carries a different PDF of it, saved only as "${saved.fileName}".` : ''} Nothing new was added (no Bills List row, no Xero draft). The email was left in the inbox. If it is not really a duplicate, remove the BK Review category to try again.`,
-      ],
-      ledger: { ...ledgerBase, ...(xeroLink ? { xeroLink } : {}) },
-    });
+    const duplicate = async (where: string, xeroLink = ''): Promise<ItemResult> => {
+      // A different PDF of something already filed was just saved as "name (2).pdf". Remove that extra copy, so a duplicate leaves nothing behind.
+      let removed = false;
+      if (!mine && saved.status === 'created_with_suffix') {
+        try {
+          await this.d.graph.deleteItem(target.drive, saved.item.id);
+          removed = true;
+        } catch (e) {
+          log.warn('Could not remove the extra copy of a duplicate', { ...plog, file: saved.fileName, error: errMsg(e) });
+        }
+      }
+      const extra = saved.status !== 'created_with_suffix' ? '' : removed ? ' This PDF is a different file from the one already filed, and it was not kept.' : ` This PDF is a different file from the one already filed and was saved as "${saved.fileName}"; please delete it.`;
+      return {
+        kind: 'review',
+        reasons: [
+          `"${att.name}": DUPLICATE ${docWord.toUpperCase()}. ${billDesc} has already been processed: ${where}.${extra} Nothing new was added (no Bills List row, no Xero draft). If it is not really a duplicate, remove the BK Review category (email) or drag the file back into the drop folder to try again.`,
+        ],
+        ledger: { ...ledgerBase, ...(removed ? { file: '' } : {}), ...(xeroLink ? { xeroLink } : {}) },
+      };
+    };
 
     // The Bills List row is written last, so a row means this bill went all the way through before.
     const rowData = (extraNote = '') => ({

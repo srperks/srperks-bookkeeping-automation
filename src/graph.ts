@@ -62,6 +62,7 @@ export interface GraphPort {
   /** Files (not folders) directly inside a folder. */
   listFiles(drive: DriveRef, folderPath: string): Promise<DriveItem[]>;
   /** Moves a file into another existing folder. A name clash gets a numbered name, nothing is overwritten. */
+  deleteItem(drive: DriveRef, itemId: string): Promise<void>;
   moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void>;
   getItem(drive: DriveRef, path: string): Promise<DriveItem | null>;
   downloadItem(drive: DriveRef, itemId: string): Promise<Buffer>;
@@ -294,6 +295,10 @@ export class GraphClient implements GraphPort {
       next = j['@odata.nextLink'];
     }
     return out;
+  }
+
+  async deleteItem(drive: DriveRef, itemId: string): Promise<void> {
+    await this.request('DELETE', `/drives/${drive.driveId}/items/${itemId}`);
   }
 
   async moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void> {

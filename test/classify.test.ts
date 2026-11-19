@@ -136,3 +136,15 @@ test('credit note headings are recognised and kept apart from bills and statemen
   // a line that only mentions a credit note is not a heading
   assert.equal(classifyLines(['Please apply the credit note to your next invoice'], DEFAULT_RULES), 'none');
 });
+
+test('a heading that only shows as a column segment is found even when the page has more than 30 lines', async () => {
+  const { classifyPage } = await import('../src/classify.js');
+  const lines = Array.from({ length: 40 }, (_, i) => (i === 7 ? 'Tax Invoice Levy Amount' : `row ${i} 12.00`));
+  const text = { page1Lines: lines, page1Segments: ['964434 1 of 1', 'Tax Invoice'], hasText: true, pageCount: 1, page1Text: lines.join('\n') } as never;
+  assert.equal(classifyPage(text, DEFAULT_RULES), 'bill');
+  assert.equal(classifyLines([...lines, 'Tax Invoice'], DEFAULT_RULES), 'none'); // the old combined window missed it
+});
+
+test('"STATEMENT - Activity" is a statement heading', () => {
+  assert.equal(classifyHeadingString('STATEMENT - Activity', DEFAULT_RULES), 'statement');
+});
