@@ -234,6 +234,7 @@ Rules:
 - Amounts are plain numbers in dollars with no symbols or thousands separators.
 - Australian GST is 10%. Mark each line gst_applicable from what the document shows (GST column, markers, notes) and make sure total_gst is the GST printed on the document.
 - The supplier is the business being paid, the customer is the business billed. Do not mix them up.
+- When a document shows both a date labelled "Issue Date" (or "Invoice Date" in the page header) and other dates in the table, such as a rent period or the date a charge falls due, use the labelled issue date for the bill. A "Due Date" is never the issue date.
 - If the PDF is not a supplier bill, a supplier credit note or a statement, set document_type to other and leave bill and statement null. A credit note is recorded in the bill object like a bill: bill_number is the credit note number, the date is the credit note date, and all amounts are positive numbers even when printed with a minus sign or brackets.
 - Pass bill and statement as real JSON objects, never as text. Include every field of the bill, including subtotal_ex_gst, total_gst and total_inc_gst. On multi-page invoices the totals are usually in a box at the bottom of the last page, so read every page.`;
 

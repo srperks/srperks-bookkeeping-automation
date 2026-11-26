@@ -78,6 +78,14 @@ function lineIsHeading(line: string, phrase: string, siblings: string[] = []): b
   return true;
 }
 
+/**
+ * Landlord and agent documents are often titled "TAX INVOICE / STATEMENT OF ACCOUNT": a tax invoice that also shows the
+ * account position. It is the tax invoice that asks for payment, so it is read as a bill. (If the PDF really lists several
+ * invoices, the invoice count sends it to review.)
+ */
+const COMBO_HEADING = /^(?:tax )?invoice (?:and )?statement(?: of account)?$|^statement(?: of account)? (?:and )?(?:tax )?invoice$/;
+export const isInvoiceStatementCombo = (line: string): boolean => COMBO_HEADING.test(line);
+
 function matchesAny(line: string, phrases: string[]): boolean {
   return phrases.some((p) => lineIsHeading(line, p, phrases));
 }
@@ -111,6 +119,10 @@ export function classifyLines(lines: string[], rules: HeadingRules, window = 30)
   for (const [idx, raw] of lines.slice(0, window).entries()) {
     const line = normLine(raw);
     if (!line) continue;
+    if (isInvoiceStatementCombo(line)) {
+      found.bill = true;
+      continue;
+    }
     for (const k of KINDS) {
       if (matchesAny(line, phrasesOf(k, rules))) found[k] = true;
       if (idx < 12 && !found[k] && endsWithHeading(line, phrasesOf(k, rules))) found[k] = true;
@@ -136,6 +148,7 @@ export function classifyPage(text: PdfText, rules: HeadingRules): HeadingKind {
 export function classifyHeadingString(heading: string, rules: HeadingRules): HeadingKind {
   const line = normLine(heading);
   if (!line) return 'none';
+  if (isInvoiceStatementCombo(line)) return 'bill';
   return pickKind({
     bill: matchesAny(line, rules.billHeadings),
     statement: matchesAny(line, rules.statementHeadings),

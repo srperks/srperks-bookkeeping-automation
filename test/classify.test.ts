@@ -148,3 +148,11 @@ test('a heading that only shows as a column segment is found even when the page 
 test('"STATEMENT - Activity" is a statement heading', () => {
   assert.equal(classifyHeadingString('STATEMENT - Activity', DEFAULT_RULES), 'statement');
 });
+
+test('"TAX INVOICE / STATEMENT OF ACCOUNT" is read as a bill, not left unrecognised', () => {
+  assert.equal(classifyHeadingString('TAX INVOICE / STATEMENT OF ACCOUNT', DEFAULT_RULES), 'bill');
+  assert.equal(classifyLines(['TAX INVOICE / STATEMENT OF ACCOUNT', 'Due Date 14/12/2026', 'Issue Date 24/11/2026'], DEFAULT_RULES), 'bill');
+  assert.equal(classifyLines(['Tax Invoice and Statement'], DEFAULT_RULES), 'bill');
+  // a plain statement is still a statement
+  assert.equal(classifyLines(['STATEMENT OF ACCOUNT'], DEFAULT_RULES), 'statement');
+});
