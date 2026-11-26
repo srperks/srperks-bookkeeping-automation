@@ -51,10 +51,13 @@ export function validateBill(
 
   // ----- dates -----
   let issueDate: string | null = null;
-  if (!isValidIsoDate(b.issue_date_iso)) {
+  // When Claude left the ISO date out but gave the date as printed, the printed text is read by code instead (no guessing).
+  const isoFromPrinted = parsePrintedDate(b.issue_date_printed);
+  const issueIso = isValidIsoDate(b.issue_date_iso) ? b.issue_date_iso : isoFromPrinted && isValidIsoDate(isoFromPrinted) ? isoFromPrinted : null;
+  if (!issueIso) {
     issues.push(`${word} issue date missing or invalid.`);
   } else {
-    issueDate = b.issue_date_iso;
+    issueDate = issueIso;
     const printed = parsePrintedDate(b.issue_date_printed);
     if (printed && printed !== issueDate) {
       issues.push(`Issue date mismatch: printed "${b.issue_date_printed}" reads as ${printed} but extraction gave ${issueDate}.`);
@@ -105,7 +108,8 @@ export function validateBill(
     const gstLines = b.lines.filter((l) => l.gst_applicable);
     const tol = gstTolerance(b.lines.length);
 
-    if (totalInc <= 0) issues.push(opts.credit ? `Credit note total ${totalInc.toFixed(2)} is zero or negative (it should be read as a positive amount).` : `Total ${totalInc.toFixed(2)} is zero or negative (credit note or misread).`);
+    if (totalInc === 0) issues.push(`Total is 0.00: the document shows nothing to pay (a free-of-charge or zero-value invoice), so it was not entered.`);
+    else if (totalInc < 0) issues.push(opts.credit ? `Credit note total ${totalInc.toFixed(2)} is zero or negative (it should be read as a positive amount).` : `Total ${totalInc.toFixed(2)} is zero or negative (credit note or misread).`);
     if (totalGst < 0) issues.push('GST amount is negative.');
 
     if (!b.line_amounts_include_gst) {

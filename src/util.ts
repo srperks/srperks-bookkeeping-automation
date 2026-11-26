@@ -52,6 +52,8 @@ export function parsePrintedDate(input: string | null | undefined): string | nul
   const s = input
     .trim()
     .replace(/\s+/g, ' ')
+    // a date stamped with a time ("19/11/26 06:28:49", "19/11/2026 6:28 PM") is still that date
+    .replace(/^(.*\d) \d{1,2}:\d{2}(?::\d{2})?(?: ?[ap]\.?m\.?)?$/i, '$1')
     .replace(/(\d)(st|nd|rd|th)\b/gi, '$1')
     .replace(/^(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.?,?\s+/i, '');
 

@@ -76,3 +76,9 @@ test('sameBusinessName ignores case, punctuation and word breaks', async () => {
   assert.equal(sameBusinessName('Acme Foods Pty Ltd', 'ACME FOODS'), true);
   assert.equal(sameBusinessName('Acme Foods', 'Acme Drinks'), false);
 });
+
+test('parsePrintedDate reads a date stamped with a time and two-digit years', () => {
+  assert.equal(parsePrintedDate('19/11/26 06:28:49'), '2026-11-19');
+  assert.equal(parsePrintedDate('19/11/2026 6:28 PM'), '2026-11-19');
+  assert.equal(parsePrintedDate('23 November 2026'), '2026-11-23');
+});

@@ -111,3 +111,28 @@ test('two passes that agree produce no differences; disagreement is listed', () 
   assert.deepEqual(compareBillPasses(billExtraction(), billExtraction({ supplier_name: 'ACME FOODS PTY. LTD.' })), []);
   assert.deepEqual(compareStatementPasses(statementExtraction(), statementExtraction()), []);
 });
+
+test('a missing ISO date is read from the printed date by code, including a date and time stamp', () => {
+  const ex = billExtraction();
+  ex.bill!.issue_date_iso = null;
+  ex.bill!.issue_date_printed = '19/10/26 06:28:49';
+  const r = validateBill(ex, ctx);
+  assert.deepEqual(r.issues, []);
+  assert.equal(r.resolved?.issueDate, '2026-10-19');
+});
+
+test('no date at all is still a problem', () => {
+  const ex = billExtraction();
+  ex.bill!.issue_date_iso = null;
+  ex.bill!.issue_date_printed = null;
+  assert.match(validateBill(ex, ctx).issues.join(' '), /issue date missing/i);
+});
+
+test('a zero-value invoice gets a clear message', () => {
+  const ex = billExtraction();
+  ex.bill!.lines = [{ description: 'Free goods', quantity: 1, unit_price: 0, line_amount: 0, gst_applicable: true }];
+  ex.bill!.subtotal_ex_gst = 0;
+  ex.bill!.total_gst = 0;
+  ex.bill!.total_inc_gst = 0;
+  assert.match(validateBill(ex, ctx).issues.join(' '), /Total is 0\.00: the document shows nothing to pay/);
+});
