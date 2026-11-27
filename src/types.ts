@@ -100,8 +100,12 @@ export const ClientsFileSchema = z.object({
       extraCreditHeadings: z.array(z.string()).default([]),
       /** Suppliers (part of the name) whose invoices print no invoice date: the ORDER DATE is used as the issue date. */
       orderDateSuppliers: z.array(z.string()).default([]),
+      /** Suppliers (part of the name) whose invoices carry no invoice number: the "Payment Ref" is used as the bill number and the "Statement Date" as the issue date. */
+      paymentRefSuppliers: z.array(z.string()).default([]),
+      /** Currencies entered as if they were AUD (amounts as printed, no GST, flagged for a person to convert). */
+      foreignCurrencyAsAud: z.array(z.string()).default([]),
     })
-    .default({ extraBillHeadings: [], extraStatementHeadings: [], extraCreditHeadings: [], orderDateSuppliers: [] }),
+    .default({ extraBillHeadings: [], extraStatementHeadings: [], extraCreditHeadings: [], orderDateSuppliers: [], paymentRefSuppliers: [], foreignCurrencyAsAud: [] }),
   allowedCurrencies: z.array(z.string()).default(['AUD']),
   log: z
     .object({

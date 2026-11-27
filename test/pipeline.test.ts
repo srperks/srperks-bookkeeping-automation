@@ -21,14 +21,14 @@ async function randomPdf(tag: string) {
   return makePdf([{ text: 'Acme Foods Pty Ltd', y: 60 }, { text: 'Purchase Order', y: 110, size: 22 }, { text: `PO ${tag}`, y: 150 }]);
 }
 
-function setup(over: { dryRun?: boolean; passes?: number; fuzzy?: 'review' | 'create' } = {}) {
+function setup(over: { dryRun?: boolean; passes?: number; fuzzy?: 'review' | 'create'; foreignAsAud?: string[] } = {}) {
   const graph = new FakeGraph();
   const xero = new FakeXero();
   const extractor = new FakeExtractor();
   const alerter = new FakeAlerter();
   const ledger = new FakeLedger();
   const pipeline = new Pipeline({
-    cfg: { dryRun: over.dryRun ?? false, passes: over.passes ?? 2, allowedCurrencies: ['AUD'], contactFuzzyPolicy: over.fuzzy ?? 'review', createMissingContacts: true, blockOnDmarcFail: true, clients },
+    cfg: { dryRun: over.dryRun ?? false, passes: over.passes ?? 2, allowedCurrencies: ['AUD'], foreignCurrencyAsAud: over.foreignAsAud ?? [], contactFuzzyPolicy: over.fuzzy ?? 'review', createMissingContacts: true, blockOnDmarcFail: true, clients },
     graph, xero, extractor, rules: DEFAULT_RULES, log: silentLogger, alerter, ledger,
     now: () => new Date('2026-10-28T10:00:00+11:00'),
   });
@@ -867,4 +867,26 @@ test('drop-only client: no Outlook folder is needed to process the drop folder',
   t.graph.files.set('Hopper/Drop/d.pdf', pdf);
   const out = await t.pipeline.processDrops(hop);
   assert.deepEqual(out.map((o) => o.status), ['filed']);
+});
+
+test('INR bill (foreignCurrencyAsAud): drafted in AUD as printed with no GST and a Reference telling staff to convert', async () => {
+  const t = setup({ foreignAsAud: ['INR'] });
+  const pdf = await billPdf('E040102N3P');
+  const ex = billExtraction();
+  const b = ex.bill!;
+  b.currency = 'INR';
+  b.bill_number = 'E040102N3P';
+  b.lines = [{ description: 'Microsoft 365 Business Basic', quantity: 7, unit_price: 145, line_amount: 1015, gst_applicable: true }];
+  b.subtotal_ex_gst = 1015;
+  b.total_gst = 182.7;
+  b.total_inc_gst = 1197.7;
+  t.extractor.on(pdf, ex);
+  const out = await t.pipeline.processMessage(t.graph.addMessage('i1', HOPPER, [{ name: 'ms.pdf', buf: pdf }]));
+  assert.equal(out.status, 'moved');
+  const bill = t.xero.bills[0]!;
+  assert.equal(bill.status, 'DRAFT');
+  assert.equal(bill.input!.currency, 'AUD');
+  assert.equal(bill.input!.lines.length, 2);
+  assert.match(bill.input!.reference ?? '', /INR bill entered as AUD/);
+  assert.equal(bill.total, 1197.7);
 });

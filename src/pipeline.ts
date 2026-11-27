@@ -3,7 +3,7 @@ import { GraphError, type DriveItem, type DriveRef, type GraphPort, type MailAtt
 import { XeroAuthError, XeroConfigError, XeroError, type XeroPort } from './xero.js';
 import { decideType, type HeadingRules } from './classify.js';
 import { readPdfText, type PdfText } from './pdftext.js';
-import { compareBillPasses, compareStatementPasses, validateBill, validateStatement } from './validate.js';
+import { compareBillPasses, compareStatementPasses, treatCurrencyAsAud, validateBill, validateStatement } from './validate.js';
 import { billFileName, creditFileName, statementFileName, withSuffix } from './naming.js';
 import { buildDraftLines, expectedXeroTotals } from './billmap.js';
 import { errMsg, type Logger } from './logger.js';
@@ -52,6 +52,8 @@ export interface PipelineConfig {
   dryRun: boolean;
   passes: number;
   allowedCurrencies: string[];
+  /** Currencies entered as if they were AUD (see treatCurrencyAsAud). */
+  foreignCurrencyAsAud?: string[];
   contactFuzzyPolicy: 'review' | 'create';
   createMissingContacts: boolean;
   blockOnDmarcFail: boolean;
@@ -389,6 +391,8 @@ export class Pipeline {
     const docLabel = isCredit ? 'Supplier credit note' : 'Supplier bill';
     const sign = isCredit ? -1 : 1; // the Bills List shows a credit note as a negative amount
     const xeroLink = (id: string) => (isCredit ? XERO_CREDIT_LINK(id) : XERO_LINK(id));
+    const foreignCurrency = first.bill ? treatCurrencyAsAud(first.bill, cfg.foreignCurrencyAsAud ?? []) : null;
+    const foreignNote = foreignCurrency ? `${foreignCurrency} bill entered as AUD, amounts as printed, no GST: convert to AUD` : '';
     const v = validateBill(first, ctx, { credit: isCredit });
     if (v.issues.length > 0 || !v.resolved || !first.bill) {
       return { kind: 'review', reasons: v.issues.map((i) => `"${att.name}": ${i}`), ledger: { docType: isCredit ? 'Credit note' : 'Bill', supplier, number: first.bill?.bill_number ?? '' } };
@@ -456,7 +460,7 @@ export class Pipeline {
       gst: sign * resolved.totalGst,
       total: sign * resolved.totalIncGst,
       fileName: saved.fileName,
-      notes: [isCredit ? 'Credit note (draft in Xero, not yet applied to a bill)' : '', scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
+      notes: [isCredit ? 'Credit note (draft in Xero, not yet applied to a bill)' : '', foreignNote, scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
     });
     if (!mine) {
       if (saved.status === 'created_with_suffix') return duplicate(`the same ${docWord} is already filed in SharePoint under another PDF`);
@@ -484,7 +488,7 @@ export class Pipeline {
       // When the supplier cannot be matched with certainty, the draft is created under a placeholder contact instead of
       // stopping everything. The real supplier name stays in the file name, the Bills List and the Xero Reference field.
       let unconfirmed: string | null = null;
-      let reference: string | undefined;
+      let reference: string | undefined = foreignNote ? `CHECK AMOUNTS: ${foreignNote}`.slice(0, 255) : undefined;
       let contact = resolved0;
       if (!resolved0.ok) {
         const ph = await this.d.xero.resolveContact(tenant, UNCONFIRMED_CONTACT, null, { fuzzyPolicy: 'create', createMissing: true });
@@ -493,7 +497,7 @@ export class Pipeline {
         }
         contact = ph;
         unconfirmed = resolved0.reason;
-        reference = `CHECK SUPPLIER: ${supplier}`;
+        reference = `CHECK SUPPLIER: ${supplier}${foreignNote ? ` | ${foreignNote}` : ''}`.slice(0, 255);
       }
       if (!contact.ok) throw new Error('unreachable');
       const unconfirmedNote = unconfirmed ? `Xero supplier not confirmed: draft is under "${UNCONFIRMED_CONTACT}" (${unconfirmed})` : '';

@@ -185,6 +185,25 @@ function sortedAmounts(b: BillData): string {
     .join('|');
 }
 
+/**
+ * A supplier bill in a currency the team enters as AUD (they convert by hand): the amounts stay as printed, the currency
+ * becomes AUD, and the foreign tax (for example Indian GST) is kept as a GST-free line so the total still equals the PDF.
+ * Returns the original currency when something was changed, otherwise null.
+ */
+export function treatCurrencyAsAud(b: BillData, list: string[]): string | null {
+  const cur = (b.currency ?? '').trim().toUpperCase();
+  if (!cur || cur === 'AUD' || !list.includes(cur)) return null;
+  const tax = round2(b.total_gst ?? 0);
+  b.lines = b.lines.map((l) => ({ ...l, gst_applicable: false }));
+  if (!b.line_amounts_include_gst && tax > 0) {
+    b.lines.push({ description: `Overseas tax (${cur}), not claimable`, quantity: 1, unit_price: tax, line_amount: tax, gst_applicable: false });
+  }
+  b.total_gst = 0;
+  if (b.total_inc_gst !== null) b.subtotal_ex_gst = b.total_inc_gst;
+  b.currency = 'AUD';
+  return cur;
+}
+
 export function compareBillPasses(a: Extraction, b: Extraction): string[] {
   const diffs: string[] = [];
   if (!sameBusinessName(a.supplier_name ?? '', b.supplier_name ?? '')) diffs.push(`supplier name ("${a.supplier_name}" vs "${b.supplier_name}")`);

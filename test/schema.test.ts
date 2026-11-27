@@ -118,3 +118,10 @@ test('the order-date rule is added to the instructions only for the suppliers na
   const p = buildSystemPrompt(['Natoora']);
   assert.ok(p.includes('"Natoora"') && p.includes('ORDER DATE') && p.includes('every other supplier'));
 });
+
+test('payment-ref suppliers get an extra prompt rule, others do not', async () => {
+  const { buildSystemPrompt } = await import('../src/extract.js');
+  assert.ok(buildSystemPrompt([], ['Microsoft']).includes('Payment Ref'));
+  assert.ok(!buildSystemPrompt([], []).includes('Payment Ref'));
+  assert.ok(buildSystemPrompt(['Natoora'], ['Microsoft']).includes('ORDER DATE'));
+});

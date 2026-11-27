@@ -136,3 +136,29 @@ test('a zero-value invoice gets a clear message', () => {
   ex.bill!.total_inc_gst = 0;
   assert.match(validateBill(ex, ctx).issues.join(' '), /Total is 0\.00: the document shows nothing to pay/);
 });
+
+test('INR bill is treated as AUD: amounts as printed, Indian tax kept as a GST-free line, total unchanged', async () => {
+  const { treatCurrencyAsAud } = await import('../src/validate.js');
+  const ex = billExtraction();
+  const b = ex.bill!;
+  b.currency = 'INR';
+  b.line_amounts_include_gst = false;
+  b.lines = [{ description: 'Microsoft 365 Business Basic', quantity: 7, unit_price: 145, line_amount: 1015, gst_applicable: true }];
+  b.subtotal_ex_gst = 1015;
+  b.total_gst = 182.7;
+  b.total_inc_gst = 1197.7;
+  b.bill_number = 'E040102N3P';
+  b.issue_date_iso = '2026-10-07';
+  b.issue_date_printed = '07/10/2026';
+  assert.equal(treatCurrencyAsAud(b, ['INR']), 'INR');
+  const r = validateBill(ex, { today: '2026-10-28', allowedCurrencies: ['AUD'] });
+  assert.deepEqual(r.issues, []);
+  assert.equal(r.resolved?.totalIncGst, 1197.7);
+  assert.equal(r.resolved?.totalGst, 0);
+  assert.equal(b.lines.length, 2);
+  // other currencies, and AUD, are left alone
+  const usd = billExtraction();
+  usd.bill!.currency = 'USD';
+  assert.equal(treatCurrencyAsAud(usd.bill!, ['INR']), null);
+  assert.equal(usd.bill!.currency, 'USD');
+});

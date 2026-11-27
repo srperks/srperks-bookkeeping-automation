@@ -243,10 +243,13 @@ Rules:
  * Some suppliers (Natoora) print an order date and a delivery date but no invoice date. For the suppliers named in the
  * client config, the ORDER DATE is the issue date. Any other supplier without an invoice date still goes to review.
  */
-export function buildSystemPrompt(orderDateSuppliers: string[]): string {
+export function buildSystemPrompt(orderDateSuppliers: string[], paymentRefSuppliers: string[] = []): string {
   const names = orderDateSuppliers.map((n) => n.trim()).filter(Boolean);
-  if (names.length === 0) return SYSTEM_PROMPT;
-  return `${SYSTEM_PROMPT}
+  const refNames = paymentRefSuppliers.map((n) => n.trim()).filter(Boolean);
+  const refRule = refNames.length === 0 ? '' : `
+- Exception for these suppliers only (their invoices print no invoice number): if the supplier name contains ${refNames.map((n) => `"${n}"`).join(' or ')}, use the "Payment Ref" as bill_number and the "Statement Date" as the issue date (copy it exactly as printed into issue_date_printed, and as YYYY-MM-DD in issue_date_iso). Do not do this for any other supplier.`;
+  if (names.length === 0) return SYSTEM_PROMPT + refRule;
+  return `${SYSTEM_PROMPT}${refRule}
 - Exception for these suppliers only (their invoices print no invoice date): if the supplier name contains ${names.map((n) => `"${n}"`).join(' or ')}, use the ORDER DATE as the issue date. Copy it exactly as printed into issue_date_printed and give it as YYYY-MM-DD in issue_date_iso. Do not use the delivery date. For every other supplier, never use an order or delivery date as the issue date; if there is no invoice date, use null.`;
 }
 
@@ -261,9 +264,10 @@ export class ClaudeExtractor implements Extractor {
     apiKey: string,
     private readonly model: string,
     orderDateSuppliers: string[] = [],
+    paymentRefSuppliers: string[] = [],
   ) {
     this.client = new Anthropic({ apiKey, maxRetries: 3, timeout: 120_000 });
-    this.systemPrompt = buildSystemPrompt(orderDateSuppliers);
+    this.systemPrompt = buildSystemPrompt(orderDateSuppliers, paymentRefSuppliers);
   }
 
   /** Cheapest possible call: proves the key works and the model name is valid. */
