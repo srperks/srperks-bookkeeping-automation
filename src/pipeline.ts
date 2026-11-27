@@ -513,6 +513,21 @@ export class Pipeline {
           return duplicate(`Xero already has it for ${contact.contact.name} (${existing.status})`, xeroLink(existing.invoiceId));
         }
       }
+      if (!existing) {
+        // Xero treats a POST whose InvoiceNumber already exists as an UPDATE of that invoice (any supplier, any status),
+        // which could overwrite someone else's bill. So a number already in use is never posted: a person decides.
+        const clash = await (isCredit ? this.d.xero.findCreditNotesByNumber(tenant, billNumber) : this.d.xero.findInvoicesByNumberAny(tenant, billNumber));
+        if (clash.length > 0) {
+          const c = clash[0]!;
+          return {
+            kind: 'review',
+            reasons: [
+              `"${att.name}": Xero already has ${isCredit ? 'a credit note' : 'an invoice'} numbered ${billNumber} (${c.contactName ? `${c.contactName}, ` : ''}${c.status}, total ${moneyFmt(c.total)}${c.date ? `, dated ${c.date}` : ''}). Creating another with the same number would make Xero change that one instead, so nothing was created in Xero. The PDF is saved as "${saved.fileName}". Enter this ${docWord} in Xero by hand (with a different number if needed): ${xeroLink(c.invoiceId)}`,
+            ],
+            ledger: { ...ledgerBase, file: saved.fileName, xeroLink: xeroLink(c.invoiceId) },
+          };
+        }
+      }
       if (existing) {
         this.touched.add(touchKey);
         if (!(await this.d.xero.hasAttachment(tenant, existing.invoiceId, saved.fileName, xdoc))) {
@@ -591,7 +606,8 @@ export class Pipeline {
           throw new SystemicError(`SharePoint folder "${f}" does not exist for ${client.name}. Create it or fix the client mapping.`);
         }
       }
-      const folderId = await this.d.graph.resolveMailFolder(client.outlookFolder);
+      // A drop-folder-only client has no Outlook folder to resolve.
+      const folderId = client.outlookFolder ? await this.d.graph.resolveMailFolder(client.outlookFolder) : '';
       const entry = { at: Date.now(), drive, folderId };
       this.targetCache.set(client.key, entry);
       return entry;

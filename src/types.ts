@@ -63,8 +63,9 @@ export interface Extractor {
 export const ClientSchema = z.object({
   key: z.string().min(1),
   name: z.string().min(1),
-  senders: z.array(z.string().email()).min(1),
-  outlookFolder: z.string().min(1),
+  /** A client that only uses a drop folder (no bookkeeping inbox) leaves senders and outlookFolder out. */
+  senders: z.array(z.string().email()).default([]),
+  outlookFolder: z.string().min(1).optional(),
   sharepoint: z.object({
     hostname: z.string().min(1),
     sitePath: z.string().min(1),

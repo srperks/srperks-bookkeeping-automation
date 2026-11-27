@@ -840,3 +840,31 @@ test('credit note dropped in the drop folder is filed and the original moves to 
   assert.equal(t.xero.credits.length, 1);
   assert.deepEqual(t.graph.filesIn('Hopper/Drop/Processed'), ['credit.pdf']);
 });
+
+// ---------------------------------------------------------------------------
+// A number already used in Xero must never be posted (Xero would update that invoice instead)
+// ---------------------------------------------------------------------------
+
+test('Xero already has an invoice with this number under another supplier and another total: nothing is posted, review with the details', async () => {
+  const t = setup();
+  const pdf = await billPdf('INV-1452');
+  const ex = billExtraction();
+  ex.bill!.bill_number = 'INV-1452';
+  t.extractor.on(pdf, ex);
+  t.xero.bills.push({ tenant: HOPPER_TENANT, invoiceId: 'old-1', invoiceNumber: 'INV-1452', status: 'PAID', total: 999.99, totalTax: 90.9, contactId: 'someone-else', reference: '', contactName: 'Other Supplier', date: '2025-05-01', attachments: [] } as never);
+  const before = t.xero.bills.length;
+  const out = await t.pipeline.processMessage(t.graph.addMessage('n1', HOPPER, [{ name: 'a.pdf', buf: pdf }]));
+  assert.equal(out.status, 'review');
+  assert.match(out.detail.join(' '), /already has an invoice numbered INV-1452 \(Other Supplier, PAID/);
+  assert.equal(t.xero.bills.length, before);
+});
+
+test('drop-only client: no Outlook folder is needed to process the drop folder', async () => {
+  const t = setupDrop();
+  const hop = { ...t.hopper, outlookFolder: undefined, senders: [] } as typeof t.hopper;
+  const pdf = await billPdf('D-1');
+  t.extractor.on(pdf, billExtraction());
+  t.graph.files.set('Hopper/Drop/d.pdf', pdf);
+  const out = await t.pipeline.processDrops(hop);
+  assert.deepEqual(out.map((o) => o.status), ['filed']);
+});

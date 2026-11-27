@@ -31,6 +31,8 @@ export interface XeroBill {
   totalTax: number;
   contactId: string;
   reference?: string;
+  contactName?: string;
+  date?: string;
 }
 
 export interface XeroContact {
@@ -55,6 +57,8 @@ export interface XeroPort {
   findBill(tenantId: string, contactId: string, billNumber: string, reference?: string): Promise<XeroBill | null>;
   /** Every purchase bill with this number under any contact (used to catch a bill already entered under another supplier). */
   findBillsByNumber(tenantId: string, billNumber: string): Promise<XeroBill[]>;
+  /** Every invoice with this number, any type, supplier or status (Xero would UPDATE it if the number were reused). */
+  findInvoicesByNumberAny(tenantId: string, billNumber: string): Promise<XeroBill[]>;
   createDraftBill(tenantId: string, bill: DraftBillInput, idempotencyKey: string): Promise<XeroBill>;
   /** Supplier credit notes (ACCPAYCREDIT). The result reuses XeroBill: invoiceId is the credit note id, invoiceNumber its number. */
   findCreditNote(tenantId: string, contactId: string, creditNumber: string, reference?: string): Promise<XeroBill | null>;
@@ -365,6 +369,8 @@ export class XeroClient implements XeroPort {
       totalTax: Number(i.TotalTax ?? 0),
       contactId: String((i.Contact as { ContactID?: string } | undefined)?.ContactID ?? ''),
       reference: String(i.Reference ?? ''),
+      contactName: String((i.Contact as { Name?: string } | undefined)?.Name ?? ''),
+      date: typeof i.DateString === 'string' ? i.DateString.slice(0, 10) : '',
     };
   }
 
@@ -393,6 +399,14 @@ export class XeroClient implements XeroPort {
       query: { InvoiceNumbers: billNumber.trim(), Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID', where: 'Type=="ACCPAY"' },
     });
     return j.Invoices.filter((i) => normaliseDocNumber(String(i.InvoiceNumber ?? '')) === wanted).map((i) => this.toBill(i));
+  }
+
+  async findInvoicesByNumberAny(tenantId: string, billNumber: string): Promise<XeroBill[]> {
+    const wanted = normaliseDocNumber(billNumber);
+    const j = await this.call<{ Invoices?: Array<Record<string, unknown>> }>(tenantId, 'GET', '/Invoices', {
+      query: { InvoiceNumbers: billNumber.trim() },
+    });
+    return (j.Invoices ?? []).filter((i) => normaliseDocNumber(String(i.InvoiceNumber ?? '')) === wanted).map((i) => this.toBill(i));
   }
 
   async createDraftBill(tenantId: string, bill: DraftBillInput, idempotencyKey: string): Promise<XeroBill> {

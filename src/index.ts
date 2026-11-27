@@ -58,7 +58,7 @@ async function main(): Promise<void> {
     mailbox: cfg.mailbox,
     dryRun: cfg.dryRun,
     processFrom: cfg.processFrom?.toISOString() ?? null,
-    clients: f.clients.map((c) => ({ key: c.key, senders: c.senders, bills: c.sharepoint.billsFolder, statements: c.sharepoint.statementsFolder, outlook: c.outlookFolder })),
+    clients: f.clients.map((c) => ({ key: c.key, senders: c.senders, bills: c.sharepoint.billsFolder, statements: c.sharepoint.statementsFolder, outlook: c.outlookFolder ?? '(drop folder only)' })),
     model: cfg.extraction.model,
     passes: cfg.extraction.passes,
   });

@@ -63,9 +63,12 @@ async function main() {
         if (!(await graph.folderExists(drive, folder))) throw new Error('folder not found');
       });
     }
-    await check(`Outlook folder "${c.outlookFolder}" exists`, async () => {
-      await graph.resolveMailFolder(c.outlookFolder);
-    });
+    if (c.outlookFolder) {
+      const outlook = c.outlookFolder;
+      await check(`Outlook folder "${outlook}" exists`, async () => {
+        await graph.resolveMailFolder(outlook);
+      });
+    }
     await check(`Xero organisation ${c.xero.tenantId} authorised, tax types "${c.xero.taxTypeWithGst}" / "${c.xero.taxTypeNoGst}" valid`, async () => {
       await xero.ensureOrgReady(c);
     });

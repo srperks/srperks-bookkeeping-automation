@@ -184,6 +184,9 @@ export class FakeXero implements XeroPort {
     return b;
   }
 
+  async findInvoicesByNumberAny(tenant: string, num: string) {
+    return this.bills.filter((b) => b.tenant === tenant && normaliseDocNumber(b.invoiceNumber) === normaliseDocNumber(num));
+  }
   async findCreditNote(tenant: string, contactId: string, num: string, reference?: string) {
     return this.credits.find((b) => b.tenant === tenant && b.contactId === contactId && normaliseDocNumber(b.invoiceNumber) === normaliseDocNumber(num) && (reference === undefined || b.reference === reference)) ?? null;
   }
