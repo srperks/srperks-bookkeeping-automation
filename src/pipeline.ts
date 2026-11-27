@@ -3,7 +3,7 @@ import { GraphError, type DriveItem, type DriveRef, type GraphPort, type MailAtt
 import { XeroAuthError, XeroConfigError, XeroError, type XeroPort } from './xero.js';
 import { decideType, type HeadingRules } from './classify.js';
 import { readPdfText, type PdfText } from './pdftext.js';
-import { compareBillPasses, compareStatementPasses, treatCurrencyAsAud, validateBill, validateStatement } from './validate.js';
+import { compareBillPasses, compareStatementPasses, treatCurrencyAsAud, validateBill, validateBillRelaxed, validateStatement } from './validate.js';
 import { billFileName, creditFileName, statementFileName, withSuffix } from './naming.js';
 import { buildDraftLines, expectedXeroTotals } from './billmap.js';
 import { errMsg, type Logger } from './logger.js';
@@ -76,7 +76,7 @@ type ItemResult =
   | { kind: 'saved'; doc: DocKind; fileName: string; note?: string; ledger: Omit<LedgerRow, 'when' | 'client' | 'outcome' | 'emailSubject'> }
   | { kind: 'planned'; doc: DocKind; fileName: string; note: string }
   | { kind: 'other'; reason: string }
-  | { kind: 'review'; reasons: string[]; ledger?: Partial<LedgerRow> };
+  | { kind: 'review'; reasons: string[]; ledger?: Partial<LedgerRow>; renameTo?: string };
 
 export type MessageStatus = 'ignored' | 'left_no_pdf' | 'left_unrecognised' | 'review' | 'moved' | 'partial' | 'dry_run';
 
@@ -263,7 +263,7 @@ export class Pipeline {
     const att: MailAttachment = { id: item.id, name: item.name, contentType: 'application/pdf', size: item.size, isInline: false, odataType: '#microsoft.graph.fileAttachment' };
     const dlog = { client: client.key, file: item.name };
 
-    const toReview = async (reasons: string[], ledger?: Partial<LedgerRow>): Promise<DropOutcome> => {
+    const toReview = async (reasons: string[], ledger?: Partial<LedgerRow>, renameTo?: string): Promise<DropOutcome> => {
       log.warn('Drop folder file needs review', { ...dlog, reasons });
       if (cfg.dryRun) return { file: item.name, status: 'dry_run', detail: reasons };
       await this.writeLedger(client, msg, 'Needs review (drop folder)', { ...ledger, notes: reasons.join(' | ') });
@@ -276,11 +276,11 @@ export class Pipeline {
           'Why it was not filed automatically:',
           ...reasons.map((r) => `- ${r}`),
           '',
-          `The file was moved to "${folder}/${DROP_REVIEW}". Fix the problem, then drag the file back into the drop folder to try again.`,
+          `The file was moved to "${folder}/${DROP_REVIEW}"${renameTo ? ` and renamed "${renameTo}"` : ''}. Fix the problem, then drag the file back into the drop folder to try again.`,
         ].join('\n'),
         `drop-review:${item.id}`,
       );
-      await graph.moveItem(target.drive, item.id, `${folder}/${DROP_REVIEW}`);
+      await graph.moveItem(target.drive, item.id, `${folder}/${DROP_REVIEW}`, renameTo);
       this.dropAttempts.delete(item.id);
       return { file: item.name, status: 'review', detail: reasons };
     };
@@ -297,7 +297,7 @@ export class Pipeline {
         log.info(`Dry run result: would save "${result.fileName}". ${result.note}`, dlog);
         return { file: item.name, status: 'dry_run', detail: [`Would save "${result.fileName}". ${result.note}`] };
       }
-      if (result.kind === 'review') return await toReview(result.reasons, result.ledger);
+      if (result.kind === 'review') return await toReview(result.reasons, result.ledger, result.renameTo);
       if (result.kind === 'other') return await toReview([result.reason]);
 
       await this.writeLedger(client, msg, 'Saved and filed (drop folder)', result.ledger);
@@ -352,11 +352,17 @@ export class Pipeline {
     }
     const passes: Extraction[] = [first];
     for (let i = 1; i < cfg.passes; i++) passes.push(await extractor.extract(buf));
+    const relaxed = client.relaxedChecks && kind !== 'statement';
+    const passWarnings: string[] = [];
     for (const p of passes.slice(1)) {
       const diffs = [
         ...(p.document_type !== (kind === 'credit' ? 'credit_note' : kind) ? [`document type (${kind} vs ${p.document_type})`] : []),
-        ...(kind === 'statement' ? compareStatementPasses(first, p) : compareBillPasses(first, p)),
+        ...(kind === 'statement' ? compareStatementPasses(first, p) : compareBillPasses(first, p, relaxed)),
       ];
+      if (relaxed && diffs.length === 0) {
+        const soft = compareBillPasses(first, p);
+        if (soft.length > 0) passWarnings.push(`two readings differed on ${soft.join(', ')}`);
+      }
       if (diffs.length > 0) {
         return { kind: 'review', reasons: [`"${att.name}": two independent readings of the PDF disagree on ${diffs.join(', ')}.`] };
       }
@@ -393,7 +399,8 @@ export class Pipeline {
     const xeroLink = (id: string) => (isCredit ? XERO_CREDIT_LINK(id) : XERO_LINK(id));
     const foreignCurrency = first.bill ? treatCurrencyAsAud(first.bill, cfg.foreignCurrencyAsAud ?? []) : null;
     const foreignNote = foreignCurrency ? `${foreignCurrency} bill entered as AUD, amounts as printed, no GST: convert to AUD` : '';
-    const v = validateBill(first, ctx, { credit: isCredit });
+    const v = (relaxed ? validateBillRelaxed : validateBill)(first, ctx, { credit: isCredit });
+    if (v.resolved && relaxed) v.resolved.warnings.push(...passWarnings);
     if (v.issues.length > 0 || !v.resolved || !first.bill) {
       return { kind: 'review', reasons: v.issues.map((i) => `"${att.name}": ${i}`), ledger: { docType: isCredit ? 'Credit note' : 'Bill', supplier, number: first.bill?.bill_number ?? '' } };
     }
@@ -403,6 +410,18 @@ export class Pipeline {
     const fileName = isCredit ? creditFileName(resolved.issueDate, supplier, billNumber) : billFileName(resolved.issueDate, supplier, billNumber);
     // In the Bills List a credit note is told apart from an invoice with the same number.
     const listNumber = isCredit ? `Credit Note ${billNumber}` : billNumber;
+
+    // Relaxed mode: a zero or negative bill is renamed and sent to review, never filed or entered in Xero.
+    if (resolved.reviewOnly) {
+      if (cfg.dryRun) return { kind: 'planned', doc: kind, fileName, note: `Would rename to "${fileName}" and put in ${DROP_REVIEW} (${resolved.reviewOnly})` };
+      return {
+        kind: 'review',
+        reasons: [`"${att.name}": ${resolved.reviewOnly} New name: "${fileName}".`],
+        renameTo: fileName,
+        ledger: { docType: docLabel, supplier, number: billNumber, docDate: resolved.issueDate, total: moneyFmt(resolved.totalIncGst), file: fileName },
+      };
+    }
+    const warnNote = resolved.warnings.length ? `CHECK: ${resolved.warnings.join('; ')}` : '';
 
     const loc = await this.resolveFolder(client, 'bill', resolved.issueDate, target.drive);
     if (!loc.ok) return { kind: 'review', reasons: [`"${att.name}": ${loc.reason}`], ledger: { docType: docLabel, supplier, number: billNumber, docDate: resolved.issueDate } };
@@ -460,7 +479,7 @@ export class Pipeline {
       gst: sign * resolved.totalGst,
       total: sign * resolved.totalIncGst,
       fileName: saved.fileName,
-      notes: [isCredit ? 'Credit note (draft in Xero, not yet applied to a bill)' : '', foreignNote, scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
+      notes: [isCredit ? 'Credit note (draft in Xero, not yet applied to a bill)' : '', foreignNote, warnNote, scanned ? 'Scanned copy, check carefully' : '', extraNote].filter(Boolean).join('. '),
     });
     if (!mine) {
       if (saved.status === 'created_with_suffix') return duplicate(`the same ${docWord} is already filed in SharePoint under another PDF`);
@@ -488,7 +507,8 @@ export class Pipeline {
       // When the supplier cannot be matched with certainty, the draft is created under a placeholder contact instead of
       // stopping everything. The real supplier name stays in the file name, the Bills List and the Xero Reference field.
       let unconfirmed: string | null = null;
-      let reference: string | undefined = foreignNote ? `CHECK AMOUNTS: ${foreignNote}`.slice(0, 255) : undefined;
+      const refParts = [foreignNote, warnNote.replace(/^CHECK: /, '')].filter(Boolean).join(' | ');
+      let reference: string | undefined = refParts ? `CHECK AMOUNTS: ${refParts}`.slice(0, 255) : undefined;
       let contact = resolved0;
       if (!resolved0.ok) {
         const ph = await this.d.xero.resolveContact(tenant, UNCONFIRMED_CONTACT, null, { fuzzyPolicy: 'create', createMissing: true });
@@ -497,7 +517,7 @@ export class Pipeline {
         }
         contact = ph;
         unconfirmed = resolved0.reason;
-        reference = `CHECK SUPPLIER: ${supplier}${foreignNote ? ` | ${foreignNote}` : ''}`.slice(0, 255);
+        reference = `CHECK SUPPLIER: ${supplier}${refParts ? ` | ${refParts}` : ''}`.slice(0, 255);
       }
       if (!contact.ok) throw new Error('unreachable');
       const unconfirmedNote = unconfirmed ? `Xero supplier not confirmed: draft is under "${UNCONFIRMED_CONTACT}" (${unconfirmed})` : '';

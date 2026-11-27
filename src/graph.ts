@@ -63,7 +63,7 @@ export interface GraphPort {
   listFiles(drive: DriveRef, folderPath: string): Promise<DriveItem[]>;
   /** Moves a file into another existing folder. A name clash gets a numbered name, nothing is overwritten. */
   deleteItem(drive: DriveRef, itemId: string): Promise<void>;
-  moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void>;
+  moveItem(drive: DriveRef, itemId: string, destFolderPath: string, newName?: string): Promise<void>;
   getItem(drive: DriveRef, path: string): Promise<DriveItem | null>;
   downloadItem(drive: DriveRef, itemId: string): Promise<Buffer>;
   uploadNew(drive: DriveRef, folderPath: string, fileName: string, content: Buffer): Promise<DriveItem>;
@@ -301,11 +301,11 @@ export class GraphClient implements GraphPort {
     await this.request('DELETE', `/drives/${drive.driveId}/items/${itemId}`);
   }
 
-  async moveItem(drive: DriveRef, itemId: string, destFolderPath: string): Promise<void> {
+  async moveItem(drive: DriveRef, itemId: string, destFolderPath: string, newName?: string): Promise<void> {
     const dest = await this.getItem(drive, destFolderPath);
     if (!dest) throw new GraphError(`Folder "${destFolderPath}" not found`, 404, 'FolderNotFound');
     await this.request('PATCH', `/drives/${drive.driveId}/items/${itemId}`, {
-      json: { parentReference: { id: dest.id }, '@microsoft.graph.conflictBehavior': 'rename' },
+      json: { parentReference: { id: dest.id }, ...(newName ? { name: newName } : {}), '@microsoft.graph.conflictBehavior': 'rename' },
     });
   }
 

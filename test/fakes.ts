@@ -79,12 +79,13 @@ export class FakeGraph implements GraphPort {
   async deleteItem(_d: DriveRef, itemId: string) {
     this.files.delete(itemId);
   }
-  async moveItem(_d: DriveRef, itemId: string, destFolder: string) {
+  async moveItem(_d: DriveRef, itemId: string, destFolder: string, newName?: string) {
     if (this.failMove) throw new GraphError('move failed', 503);
     const buf = this.files.get(itemId)!;
     this.files.delete(itemId);
-    let key = `${destFolder}/${itemId.split('/').pop()}`;
-    for (let n = 2; this.files.has(key); n++) key = `${destFolder}/${n}-${itemId.split('/').pop()}`;
+    const base = newName ?? itemId.split('/').pop()!;
+    let key = `${destFolder}/${base}`;
+    for (let n = 2; this.files.has(key); n++) key = `${destFolder}/${n}-${base}`;
     this.files.set(key, buf);
   }
   async getItem(_d: DriveRef, path: string): Promise<DriveItem | null> {

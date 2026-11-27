@@ -890,3 +890,93 @@ test('INR bill (foreignCurrencyAsAud): drafted in AUD as printed with no GST and
   assert.match(bill.input!.reference ?? '', /INR bill entered as AUD/);
   assert.equal(bill.total, 1197.7);
 });
+
+// ---------------------------------------------------------------------------
+// Relaxed checks (SR Perks)
+// ---------------------------------------------------------------------------
+
+function relaxedSetup() {
+  const t = setupDrop();
+  const hop = { ...t.hopper, relaxedChecks: true } as typeof t.hopper;
+  const pipeline = new Pipeline({
+    cfg: { dryRun: false, passes: 2, allowedCurrencies: ['AUD'], contactFuzzyPolicy: 'review', createMissingContacts: true, blockOnDmarcFail: true, clients: [hop] },
+    graph: t.graph, xero: t.xero, extractor: t.extractor, rules: DEFAULT_RULES, log: silentLogger, alerter: t.alerter, ledger: t.ledger,
+    now: () => new Date('2026-10-28T10:00:00+11:00'),
+  });
+  return { ...t, pipeline, hop };
+}
+
+test('relaxed: printed total differs from the lines, still renamed, filed and drafted from the lines with a CHECK note', async () => {
+  const t = relaxedSetup();
+  const pdf = await billPdf('0004');
+  const ex = billExtraction();
+  const b = ex.bill!;
+  b.bill_number = '0004';
+  b.lines = [{ description: 'Contractor hours', quantity: 10.93, unit_price: 12, line_amount: 131.16, gst_applicable: false }];
+  b.subtotal_ex_gst = 132;
+  b.total_gst = 0;
+  b.total_inc_gst = 132;
+  t.extractor.on(pdf, ex);
+  t.graph.files.set('Hopper/Drop/nicole.pdf', pdf);
+  const out = await t.pipeline.processDrops(t.hop);
+  assert.deepEqual(out.map((o) => o.status), ['filed']);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 1);
+  assert.equal(t.xero.bills.length, 1);
+  assert.equal(t.xero.bills[0]!.total, 131.16);
+  assert.match(t.xero.bills[0]!.input!.reference ?? '', /printed total 132\.00, lines make 131\.16/);
+  assert.equal(t.graph.filesIn('Hopper/Drop/Processed').length, 1);
+});
+
+test('relaxed: a zero bill is renamed into Needs Review and nothing goes to Xero', async () => {
+  const t = relaxedSetup();
+  const pdf = await billPdf('INV2771090');
+  const ex = billExtraction();
+  const b = ex.bill!;
+  b.bill_number = 'INV2771090';
+  b.lines = [{ description: 'Free of charge item', quantity: 1, unit_price: 0, line_amount: 0, gst_applicable: false }];
+  b.subtotal_ex_gst = 0;
+  b.total_gst = 0;
+  b.total_inc_gst = 0;
+  t.extractor.on(pdf, ex);
+  t.graph.files.set('Hopper/Drop/joval.pdf', pdf);
+  const out = await t.pipeline.processDrops(t.hop);
+  assert.deepEqual(out.map((o) => o.status), ['review']);
+  assert.deepEqual(t.graph.filesIn('Hopper/Drop/Needs Review'), ['12 10 2026 - Acme Foods Pty Ltd - INV2771090.pdf']);
+  assert.equal(t.xero.bills.length, 0);
+  assert.equal(t.graph.filesIn('Hopper/Bills').length, 0);
+  assert.equal(t.alerter.alerts.length, 1);
+});
+
+test('relaxed: a duplicate still goes to review, and a missing bill number still stops', async () => {
+  const t = relaxedSetup();
+  const pdf = await billPdf('INV-2001');
+  t.extractor.on(pdf, billExtraction());
+  t.graph.files.set('Hopper/Drop/a.pdf', pdf);
+  assert.deepEqual((await t.pipeline.processDrops(t.hop)).map((o) => o.status), ['filed']);
+  t.graph.files.set('Hopper/Drop/b.pdf', pdf);
+  assert.deepEqual((await t.pipeline.processDrops(t.hop)).map((o) => o.status), ['review']);
+  assert.equal(t.xero.bills.length, 1);
+
+  const pdf2 = await billPdf('NONUM');
+  const ex = billExtraction();
+  ex.bill!.bill_number = null;
+  t.extractor.on(pdf2, ex);
+  t.graph.files.set('Hopper/Drop/c.pdf', pdf2);
+  assert.deepEqual((await t.pipeline.processDrops(t.hop)).map((o) => o.status), ['review']);
+  assert.equal(t.xero.bills.length, 1);
+});
+
+test('relaxed: no line items still drafts one line from the total', async () => {
+  const t = relaxedSetup();
+  const pdf = await billPdf('NL-1');
+  const ex = billExtraction();
+  ex.bill!.bill_number = 'NL-1';
+  ex.bill!.lines = [];
+  ex.bill!.subtotal_ex_gst = 100;
+  ex.bill!.total_gst = 10;
+  ex.bill!.total_inc_gst = 110;
+  t.extractor.on(pdf, ex);
+  t.graph.files.set('Hopper/Drop/nl.pdf', pdf);
+  assert.deepEqual((await t.pipeline.processDrops(t.hop)).map((o) => o.status), ['filed']);
+  assert.equal(t.xero.bills[0]!.total, 110);
+});

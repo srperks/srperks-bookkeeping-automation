@@ -66,6 +66,8 @@ export const ClientSchema = z.object({
   /** A client that only uses a drop folder (no bookkeeping inbox) leaves senders and outlookFolder out. */
   senders: z.array(z.string().email()).default([]),
   outlookFolder: z.string().min(1).optional(),
+  /** Relaxed checks: a bill whose amounts do not add up is still renamed, filed and drafted in Xero, with a CHECK note. Zero bills go to review. */
+  relaxedChecks: z.boolean().default(false),
   sharepoint: z.object({
     hostname: z.string().min(1),
     sitePath: z.string().min(1),

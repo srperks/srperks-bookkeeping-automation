@@ -30,6 +30,10 @@ export interface ResolvedBill {
   totalGst: number;
   totalIncGst: number;
   subtotalExGst: number;
+  /** Relaxed mode only: things that did not add up. They are written on the Xero draft and the Bills List, they do not stop it. */
+  warnings: string[];
+  /** Relaxed mode only: the file is renamed and sent to review, with nothing entered in Xero. */
+  reviewOnly?: string;
 }
 
 /**
@@ -152,7 +156,103 @@ export function validateBill(
       totalGst,
       totalIncGst: totalInc,
       subtotalExGst: subtotalEx,
+      warnings: [],
     },
+  };
+}
+
+
+/**
+ * Relaxed checks (per client). Only what is needed to name the file and find duplicates must be right: supplier, number and
+ * issue date. Everything else (amounts, GST, totals, due date, currency) is drafted from the lines as best as possible and
+ * the differences are returned as warnings. A zero or negative bill is renamed and sent to review, not entered in Xero.
+ * Mutates ex.bill (fills in a missing line, a missing description).
+ */
+export function validateBillRelaxed(
+  ex: Extraction,
+  ctx: ValidateContext,
+  opts: { credit?: boolean } = {},
+): { issues: string[]; resolved: ResolvedBill | null } {
+  const issues: string[] = [];
+  const warnings: string[] = [];
+  const b = ex.bill;
+  const word = opts.credit ? 'Credit note' : 'Bill';
+  if (!ex.supplier_name || ex.supplier_name.trim().length < 2) issues.push('Supplier name not found.');
+  if (!b) return { issues: [...issues, 'No bill details were extracted.'], resolved: null };
+  if (!b.bill_number || !b.bill_number.trim()) issues.push(opts.credit ? 'Credit note number not found.' : 'Supplier bill number not found.');
+
+  let issueDate: string | null = null;
+  const isoFromPrinted = parsePrintedDate(b.issue_date_printed);
+  const issueIso = isValidIsoDate(b.issue_date_iso) ? b.issue_date_iso : isoFromPrinted && isValidIsoDate(isoFromPrinted) ? isoFromPrinted : null;
+  if (!issueIso) {
+    issues.push(`${word} issue date missing or invalid.`);
+  } else {
+    issueDate = issueIso;
+    const printed = parsePrintedDate(b.issue_date_printed);
+    if (printed && printed !== issueDate) issues.push(`Issue date mismatch: printed "${b.issue_date_printed}" reads as ${printed} but extraction gave ${issueDate}.`);
+    if (issueDate < '2000-01-01') issues.push(`Issue date ${issueDate} is implausibly old.`);
+    if (daysBetween(ctx.today, issueDate) > 1) issues.push(`Issue date ${issueDate} is in the future.`);
+  }
+
+  let dueDate: string | null = null;
+  if (b.due_date_iso) {
+    if (!isValidIsoDate(b.due_date_iso)) warnings.push('due date not valid, left blank');
+    else if (issueDate && b.due_date_iso < issueDate) warnings.push(`due date ${b.due_date_iso} is before the issue date, left blank`);
+    else dueDate = b.due_date_iso;
+  } else if (issueDate) {
+    if (b.due_on_receipt) dueDate = issueDate;
+    else if (b.payment_terms_days !== null && Number.isInteger(b.payment_terms_days) && b.payment_terms_days >= 0 && b.payment_terms_days <= 120) dueDate = addDays(issueDate, b.payment_terms_days);
+  }
+
+  let currency = (b.currency ?? 'AUD').trim().toUpperCase();
+  if (!ctx.allowedCurrencies.includes(currency)) {
+    warnings.push(`currency ${currency} entered as AUD`);
+    currency = 'AUD';
+  }
+
+  for (const [i, l] of b.lines.entries()) {
+    if (!Number.isFinite(l.line_amount)) issues.push(`Line ${i + 1} has an invalid amount.`);
+    if (!l.description.trim()) l.description = 'Item';
+  }
+
+  const printedTotal = b.total_inc_gst === null ? null : round2(b.total_inc_gst);
+  const printedGst = b.total_gst === null ? null : round2(b.total_gst);
+  if (b.lines.length === 0 && issues.length === 0) {
+    if (printedTotal === null) {
+      issues.push('No line items and no total were found, so there is nothing to enter.');
+    } else if (printedTotal !== 0) {
+      const gst = printedGst ?? 0;
+      const amount = b.line_amounts_include_gst ? printedTotal : round2(b.subtotal_ex_gst ?? printedTotal - gst);
+      b.lines.push({ description: 'See attached invoice', quantity: 1, unit_price: amount, line_amount: amount, gst_applicable: gst > 0 });
+      warnings.push('no line items were found, one line was made from the total');
+    }
+  }
+  if (issues.length > 0 || !issueDate) return { issues, resolved: null };
+
+  const lineSum = round2(b.lines.reduce((s, l) => s + l.line_amount, 0));
+  const gstBase = round2(b.lines.filter((l) => l.gst_applicable).reduce((s, l) => s + l.line_amount, 0));
+  const incl = b.line_amounts_include_gst;
+  const tol = gstTolerance(b.lines.length);
+  const expectedGst = round2(incl ? gstBase / 11 : gstBase * GST_RATE);
+  const totalGst = printedGst !== null && printedGst >= 0 && near(printedGst, expectedGst, tol) ? printedGst : expectedGst;
+  const totalInc = incl ? lineSum : round2(lineSum + totalGst);
+  const subtotalEx = incl ? round2(totalInc - totalGst) : lineSum;
+
+  if (printedTotal !== null && !near(printedTotal, totalInc, 0.05)) warnings.push(`printed total ${printedTotal.toFixed(2)}, lines make ${totalInc.toFixed(2)}`);
+  if (printedGst !== null && !near(printedGst, totalGst, 0.05)) warnings.push(`printed GST ${printedGst.toFixed(2)}, drafted ${totalGst.toFixed(2)}`);
+  if (!incl && b.subtotal_ex_gst !== null && !near(b.subtotal_ex_gst, lineSum, 0.05)) warnings.push(`printed subtotal ${b.subtotal_ex_gst.toFixed(2)}, lines add to ${lineSum.toFixed(2)}`);
+
+  let reviewOnly: string | undefined;
+  const checkTotal = printedTotal ?? totalInc;
+  if (checkTotal === 0 || (b.lines.length > 0 && totalInc === 0)) {
+    reviewOnly = 'Total is 0.00: the document shows nothing to pay (a free-of-charge or zero-value invoice), so it was renamed but not entered in Xero.';
+  } else if (checkTotal < 0 || totalInc < 0) {
+    reviewOnly = `Total ${(printedTotal ?? totalInc).toFixed(2)} is negative, so it was renamed but not entered in Xero. Enter it by hand if it is a credit.`;
+  }
+
+  return {
+    issues,
+    resolved: { issueDate, dueDate, currency, amountsIncludeGst: incl, totalGst, totalIncGst: totalInc, subtotalExGst: subtotalEx, warnings, ...(reviewOnly ? { reviewOnly } : {}) },
   };
 }
 
@@ -204,7 +304,7 @@ export function treatCurrencyAsAud(b: BillData, list: string[]): string | null {
   return cur;
 }
 
-export function compareBillPasses(a: Extraction, b: Extraction): string[] {
+export function compareBillPasses(a: Extraction, b: Extraction, keyFieldsOnly = false): string[] {
   const diffs: string[] = [];
   if (!sameBusinessName(a.supplier_name ?? '', b.supplier_name ?? '')) diffs.push(`supplier name ("${a.supplier_name}" vs "${b.supplier_name}")`);
 
@@ -216,6 +316,7 @@ export function compareBillPasses(a: Extraction, b: Extraction): string[] {
     diffs.push(`bill number ("${ba.bill_number}" vs "${bb.bill_number}")`);
   }
   if (ba.issue_date_iso !== bb.issue_date_iso) diffs.push(`issue date (${ba.issue_date_iso} vs ${bb.issue_date_iso})`);
+  if (keyFieldsOnly) return diffs; // relaxed mode: only supplier, number and issue date must agree
   const dueA = ba.due_date_iso ?? (ba.due_on_receipt ? ba.issue_date_iso : null);
   const dueB = bb.due_date_iso ?? (bb.due_on_receipt ? bb.issue_date_iso : null);
   if (dueA !== dueB && !(dueA === null || dueB === null)) diffs.push(`due date (${dueA} vs ${dueB})`);
